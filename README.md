@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # TELNET Support Bot - Système RAG
 
 Assistant conversationnel intelligent pour le support client TELNET SmartConnect, basé sur **RAG (Retrieval-Augmented Generation)**.
@@ -131,3 +132,6 @@ Le système est organisé en modules indépendants :
 - Mode conversationnel avec mémoire
 - Système multi-agent pour tâches complexes
 - Évaluation automatique des performances
+=======
+# telnet-support-rag
+>>>>>>> 09a34b8852769000acc0d47a79f91bc1b572d1d7
