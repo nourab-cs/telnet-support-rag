@@ -1,0 +1,22 @@
+# TELNET Support Bot - RAG System Requirements (version simplifiée)
+
+# Core Framework (version compatible)
+langchain>=0.1.0
+langchain-community>=0.2.0
+langchain-chroma>=0.1.0
+
+# LLM
+langchain-ollama>=0.1.0
+
+# Document Processing (minimal)
+pypdf>=4.0.0
+python-docx>=1.0.0
+
+# Embeddings
+sentence-transformers>=2.0.0
+
+# Vector Database
+chromadb>=0.4.0
+
+# Utilities
+python-dotenv>=1.0.0
