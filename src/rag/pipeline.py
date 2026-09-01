@@ -1,5 +1,5 @@
 from .document_loader import DocumentLoader
-from .semantic_chunker import SemanticChunking
+from .chunking_agent import ChunkingAgent
 from .embedder import Embedder
 from .chroma_store import ChromaStore
 from .retriever import Retriever
@@ -47,7 +47,7 @@ class RAGPipeline:
 
         # 2 Chunking intelligent avec agent IA
         print("\nInitialisation de l'agent de chunking...")
-        chunking_agent = SemanticChunking()
+        chunking_agent = ChunkingAgent()
         chunks = chunking_agent.chunk_documents(documents)
 
         # 3 Embeddings
