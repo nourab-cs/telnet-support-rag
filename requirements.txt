@@ -1,9 +1,10 @@
-# TELNET Support Bot - RAG System Requirements (version simplifiée)
+# TELNET Support Bot - RAG System Requirements 
 
-# Core Framework (version compatible)
+# Core Framework 
 langchain>=0.1.0
 langchain-community>=0.2.0
 langchain-chroma>=0.1.0
+langchain-experimental>=0.0.1
 
 # LLM
 langchain-ollama>=0.1.0
@@ -20,3 +21,7 @@ chromadb>=0.4.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Evaluation metrics (optionnel)
+rouge-score>=0.1.0
+nltk>=3.8.0

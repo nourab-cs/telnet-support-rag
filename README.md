@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # TELNET Support Bot - Système RAG
 
 Assistant conversationnel intelligent pour le support client TELNET SmartConnect, basé sur **RAG (Retrieval-Augmented Generation)**.
@@ -11,7 +10,7 @@ telnet-support-bot/
 │   ├── __init__.py
 │   ├── document_loader.py         # Chargement multi-format de documents
 │   ├── text_cleaner.py           # Nettoyage et prétraitement
-│   ├── chunker.py                # Découpage intelligent
+│   ├── chunking_agent.py         # Agent IA de chunking intelligent
 │   ├── embedder.py               # Génération d'embeddings
 │   ├── chroma_store.py           # Base vectorielle ChromaDB
 │   ├── retriever.py              # Récupération sémantique
@@ -28,6 +27,7 @@ telnet-support-bot/
 │   └── 08_troubleshooting_guides.md
 ├── chroma_db/                    # Base vectorielle persistée
 ├── main.py                       # Point d'entrée principal
+├── agent_chunks.py               # Script de test de l'agent de chunking
 ├── requirements.txt              # Dépendances Python
 └── README.md                     # Documentation
 ```
@@ -63,13 +63,21 @@ ollama pull mistral
 ollama serve
 ```
 
-## � Utilisation
+## 💬 Utilisation
 
-### Lancer le système
+### Lancer le système principal
 
 ```bash
 python main.py
 ```
+
+### Tester l'agent de chunking
+
+```bash
+python agent_chunks.py
+```
+
+Ce script teste l'agent IA de chunking avec vos documents et affiche les statistiques de chunking.
 
 ### Questions d'exemple
 
@@ -79,13 +87,68 @@ python main.py
 - "Le service ne démarre pas, que faire ?"
 - "Quelles sont les nouveautés de la version 3.3.0 ?"
 
-## 🔧 Configuration
+### Commandes conversationnelles
+
+Le système supporte maintenant les commandes spéciales pendant la conversation :
+
+- `quit` : quitter l'application
+- `history` : afficher l'historique de conversation
+- `clear` : effacer l'historique
+- `summary` : afficher un résumé de la conversation
+
+### Tester le système conversationnel
+
+```bash
+python test_conversation.py
+```
+
+Ce script teste automatiquement les fonctionnalités de conversation avec historique.
+
+## 🤖 Agent IA de Chunking
+
+Le système utilise un **agent IA de chunking intelligent** qui analyse automatiquement chaque document pour déterminer les meilleurs paramètres de découpage.
+
+### Fonctionnalités
+
+- **Analyse automatique** : Le LLM analyse la structure et le contenu de chaque document
+- **Adaptation dynamique** : Chunk size et overlap ajustés selon le type de contenu
+- **Détection de structure** : Identifie les titres, listes, et sections
+- **Stratégies multiples** : Standard, agressive, ou conservatrice selon le document
+- **Métadonnées enrichies** : Chaque chunk contient ses paramètres de chunking
+
+### Résultats typiques
+
+Avec l'agent de chunking :
+- **72 chunks créés** à partir de 8 documents
+- **Taille moyenne** : 350 caractères
+- **Stratégie adaptative** : Standard pour la plupart, agressive pour les documents structurés
+- **Chevauchement intelligent** : 88 caractères en moyenne pour maintenir le contexte
+
+## � Historique de Conversation
+
+Le système supporte maintenant le **mode conversationnel avec mémoire** pour maintenir le contexte des échanges.
+
+### Fonctionnalités
+
+- **Mémoire conversationnelle** : Conserve jusqu'à 10 échanges question-réponse
+- **Contexte intelligent** : L'historique est inclus dans les prompts pour des réponses contextuelles
+- **Commandes spéciales** : `history`, `clear`, `summary` pour gérer la conversation
+- **Multi-sessions** : Support pour plusieurs sessions de conversation indépendantes
+
+### Avantages
+
+- Meilleure compréhension des questions de suivi
+- Réponses plus cohérentes dans le temps
+- Possibilité de se référer aux échanges précédents
+- Gestion flexible de la mémoire de conversation
+
+## �🔧 Configuration
 
 ### Modifier les paramètres RAG
 
 Les paramètres peuvent être ajustés dans les fichiers correspondants dans `src/` :
 
-- **Chunking** : `src/chunker.py` - taille et chevauchement des chunks
+- **Chunking Agent** : `src/chunking_agent.py` - agent IA et stratégie de chunking
 - **Embeddings** : `src/embedder.py` - modèle d'embedding utilisé
 - **Retrieval** : `src/retriever.py` - nombre de documents récupérés
 - **LLM** : `src/generator.py` - modèle de langage et température
@@ -104,7 +167,7 @@ Le système est organisé en modules indépendants :
 
 1. **DocumentLoader** : Charge les documents de différents formats
 2. **TextCleaner** : Nettoie et normalise le texte
-3. **Chunker** : Découpe le texte en chunks cohérents
+3. **ChunkingAgent** : Agent IA pour chunking intelligent et adaptatif
 4. **Embedder** : Génère les embeddings vectoriels
 5. **ChromaStore** : Gère la base vectorielle
 6. **Retriever** : Récupère les documents pertinents
@@ -116,7 +179,7 @@ Le système est organisé en modules indépendants :
 - **Embeddings** : BGE-M3 pour support multilingue optimal
 - **Vector DB** : ChromaDB pour recherche sémantique rapide
 - **LLM** : Mistral via Ollama pour réponses locales
-- **Chunking** : Optimisé pour maximiser la pertinence
+- **Chunking** : Agent IA adaptatif pour optimisation automatique
 
 ## 🐛 Dépannage
 
@@ -126,12 +189,12 @@ Le système est organisé en modules indépendants :
 
 **Réponses incohérentes** : Vérifiez que vos documents couvrent bien le sujet des questions
 
+**Chunking lent** : L'agent IA analyse chaque document, cela peut prendre du temps. Pour du chunking statique rapide, remplacez `ChunkingAgent` par `Chunker` dans `pipeline.py`.
+
 ## 📚 Extensions possibles
 
 - Interface web avec Streamlit ou FastAPI
 - Mode conversationnel avec mémoire
 - Système multi-agent pour tâches complexes
 - Évaluation automatique des performances
-=======
-# telnet-support-rag
->>>>>>> 09a34b8852769000acc0d47a79f91bc1b572d1d7
+- Dashboard d'administration
