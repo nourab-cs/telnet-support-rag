@@ -1,17 +1,184 @@
+"""
+Chargement et normalisation des documents pour le pipeline RAG TELNET.
+
+Formats supportés :
+- Markdown (.md)
+- Texte (.txt)
+- PDF (.pdf)
+- Word (.docx)
+
+Le loader :
+- parcourt récursivement le dossier data/
+- nettoie légèrement les textes
+- préserve la structure
+- conserve les métadonnées importantes
+- calcule un hash du fichier
+- élimine les doublons exacts
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
 from pathlib import Path
 from typing import List
 
+try:
+    from docx import Document as DocxDocument
+except ImportError:
+    DocxDocument = None
+    logging.warning(
+        "python-docx non installé. Les fichiers .docx ne seront pas chargés."
+    )
+
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
-from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyPDFLoader, UnstructuredWordDocumentLoader
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentLoader:
+    """
+    Charge les documents présents dans un dossier et ses sous-dossiers.
+    """
 
-    def __init__(self, data_dir: str):
+    SUPPORTED_EXTENSIONS = {
+        ".md",
+        ".txt",
+        ".pdf",
+        ".docx",
+    }
 
+    def __init__(
+        self,
+        data_dir: str,
+        min_chars: int = 30,
+    ):
         self.data_dir = Path(data_dir)
+        self.min_chars = min_chars
 
     def load(self) -> List[Document]:
+        """
+        Charge tous les documents supportés.
+
+        Returns:
+            Liste de Documents LangChain.
+        """
+
+        self._validate_directory()
+
+        print("=" * 60)
+        print("Chargement des documents")
+        print("=" * 60)
+
+        # Recherche récursive des fichiers supportés
+        files = sorted(
+            path
+            for path in self.data_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in self.SUPPORTED_EXTENSIONS
+        )
+
+        print(f"Fichiers détectés : {len(files)}")
+
+        documents: List[Document] = []
+
+        # Ensemble permettant de détecter les doublons
+        seen_content_hashes: set[str] = set()
+
+        failed_files = 0
+        duplicate_documents = 0
+
+        # Traitement de chaque fichier
+        for path in files:
+
+            try:
+                loaded_docs = self._load_file(path)
+
+                # Un PDF peut produire plusieurs Documents
+                for document in loaded_docs:
+
+                    # Nettoyage du contenu
+                    document.page_content = self._clean_text(
+                        document.page_content
+                    )
+
+                    # Ignore les documents trop courts
+                    if len(document.page_content.strip()) < self.min_chars:
+
+                        logger.warning(
+                            "Document ignoré car trop court : %s",
+                            path,
+                        )
+
+                        continue
+
+                    # Hash du contenu nettoyé
+                    content_hash = hashlib.sha256(
+                        document.page_content.encode("utf-8")
+                    ).hexdigest()
+
+                    # Déduplication exacte du contenu
+                    if content_hash in seen_content_hashes:
+
+                        duplicate_documents += 1
+
+                        logger.warning(
+                            "Doublon ignoré : %s",
+                            path,
+                        )
+
+                        continue
+
+                    seen_content_hashes.add(content_hash)
+
+                    # Hash du fichier original
+                    file_hash = self._file_hash(path)
+
+                    # Construction des métadonnées
+                    metadata = self._build_metadata(
+                        path=path,
+                        file_hash=file_hash,
+                        content_hash=content_hash,
+                        page=document.metadata.get("page"),
+                    )
+
+                    # Remplacement des anciennes métadonnées
+                    document.metadata = metadata
+
+                    # Ajout du document à la liste finale
+                    documents.append(document)
+
+            except Exception as exc:
+
+                failed_files += 1
+
+                logger.exception(
+                    "Erreur pendant le chargement de %s : %s",
+                    path,
+                    exc,
+                )
+
+        print()
+        print(f"Documents chargés : {len(documents)}")
+        print(f"Doublons ignorés   : {duplicate_documents}")
+        print(f"Fichiers en erreur : {failed_files}")
+
+        # Aucun document exploitable
+        if not documents:
+            raise ValueError(
+                f"Aucun document exploitable trouvé dans "
+                f"'{self.data_dir}'."
+            )
+
+        return documents
+
+    def _validate_directory(self) -> None:
+        """
+        Vérifie que le dossier existe et est bien un dossier.
+        """
 
         if not self.data_dir.exists():
             raise FileNotFoundError(
@@ -23,86 +190,189 @@ class DocumentLoader:
                 f"'{self.data_dir}' n'est pas un dossier."
             )
 
-        documents = []
+    def _load_file(self, path: Path) -> List[Document]:
+        """
+        Charge un fichier selon son extension.
+        """
 
-        print("=" * 60)
-        print("Chargement des documents")
-        print("=" * 60)
+        extension = path.suffix.lower()
 
-        # ---------- MD ----------
-        md_loader = DirectoryLoader(
-            str(self.data_dir),
-            glob="**/*.md",
-            loader_cls=TextLoader,
-            loader_kwargs={"encoding": "utf-8"},
-            show_progress=True,
-        )
-        documents.extend(md_loader.load())
+        # Markdown et texte
+        if extension in {".md", ".txt"}:
 
-        # ---------- TXT ----------
-        txt_loader = DirectoryLoader(
-            str(self.data_dir),
-            glob="**/*.txt",
-            loader_cls=TextLoader,
-            loader_kwargs={"encoding": "utf-8"},
-            show_progress=True,
-        )
-        documents.extend(txt_loader.load())
-
-        # ---------- PDF ----------
-        pdf_loader = DirectoryLoader(
-            str(self.data_dir),
-            glob="**/*.pdf",
-            loader_cls=PyPDFLoader,
-            show_progress=True,
-        )
-        documents.extend(pdf_loader.load())
-
-        # ---------- DOC/DOCX ----------
-        doc_loader = DirectoryLoader(
-            str(self.data_dir),
-            glob="**/*.doc*",
-            loader_cls=UnstructuredWordDocumentLoader,
-            show_progress=True,
-        )
-        documents.extend(doc_loader.load())
-
-        print(f"\nDocuments trouvés : {len(documents)}")
-
-        # ---------- Nettoyage ----------
-        cleaned_documents = []
-
-        for doc in documents:
-            # Récupérer le texte
-            text = doc.page_content.strip()
-
-            # Ignorer les documents trop courts
-            if len(text) < 30:
-                continue
-
-            # Nettoyage léger sans détruire la structure
-            text = "\n".join(
-                line.strip()
-                for line in text.splitlines()
-                if line.strip()
+            text = path.read_text(
+                encoding="utf-8",
+                errors="replace",
             )
 
-            # Mettre à jour le contenu
-            doc.page_content = text
+            return [
+                Document(
+                    page_content=text,
+                    metadata={},
+                )
+            ]
 
-            # Récupérer la source
-            source = doc.metadata.get("source", "")
+        # PDF
+        if extension == ".pdf":
 
-            # Métadonnées
-            doc.metadata = {
-                "source": source,
-                "filename": Path(source).name,
-                "extension": Path(source).suffix.lower(),
-            }
+            return PyPDFLoader(str(path)).load()
 
-            # Ajouter le document nettoyé
-            cleaned_documents.append(doc)
+        # Word
+        if extension == ".docx":
 
-        print(f"{len(cleaned_documents)} documents chargés.")
+            if DocxDocument is None:
 
-        return cleaned_documents
+                logger.warning(
+                    "python-docx non disponible, skipping %s",
+                    path,
+                )
+
+                return []
+
+            return [
+                self._load_docx(path)
+            ]
+
+        raise ValueError(
+            f"Format non supporté : {extension}"
+        )
+
+    def _load_docx(self, path: Path) -> Document:
+        """
+        Charge un fichier DOCX avec python-docx.
+
+        Les paragraphes et tableaux sont conservés.
+        """
+
+        docx = DocxDocument(path)
+
+        parts: list[str] = []
+
+        # Extraction des paragraphes
+        for paragraph in docx.paragraphs:
+
+            text = paragraph.text.strip()
+
+            if text:
+                parts.append(text)
+
+        # Extraction des tableaux
+        for table in docx.tables:
+
+            for row in table.rows:
+
+                cells = [
+                    cell.text.strip().replace("\n", " ")
+                    for cell in row.cells
+                ]
+
+                row_text = " | ".join(cells)
+
+                if row_text.strip():
+                    parts.append(row_text)
+
+        return Document(
+            page_content="\n".join(parts),
+            metadata={},
+        )
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """
+        Nettoyage léger sans détruire la structure.
+
+        On conserve :
+        - paragraphes
+        - listes
+        - titres
+        - indentation
+        - code
+        """
+
+        if not text:
+            return ""
+
+        # Suppression du BOM
+        text = text.replace("\ufeff", "")
+
+        # Suppression des caractères NULL
+        text = text.replace("\x00", "")
+
+        # Normalisation des retours à la ligne
+        text = text.replace("\r\n", "\n")
+        text = text.replace("\r", "\n")
+
+        # Suppression des espaces en fin de ligne
+        lines = [
+            line.rstrip()
+            for line in text.split("\n")
+        ]
+
+        cleaned = "\n".join(lines)
+
+        # Réduction des blocs de lignes vides excessifs
+        cleaned = re.sub(
+            r"\n{3,}",
+            "\n\n",
+            cleaned,
+        )
+
+        return cleaned.strip()
+
+    def _file_hash(self, path: Path) -> str:
+        """
+        Calcule un SHA-256 du fichier.
+
+        Ce hash sert notamment à détecter les modifications
+        des documents avant une réindexation.
+        """
+
+        sha256 = hashlib.sha256()
+
+        with path.open("rb") as file:
+
+            for block in iter(
+                lambda: file.read(1024 * 1024),
+                b"",
+            ):
+                sha256.update(block)
+
+        return sha256.hexdigest()
+
+    def _build_metadata(
+        self,
+        path: Path,
+        file_hash: str,
+        content_hash: str,
+        page: int | None = None,
+    ) -> dict:
+        """
+        Construit les métadonnées standardisées.
+        """
+
+        relative_path = path.relative_to(
+            self.data_dir
+        ).as_posix()
+
+        metadata = {
+            "source": str(path),
+            "filename": path.name,
+            "extension": path.suffix.lower(),
+            "relative_path": relative_path,
+            "file_hash": file_hash,
+            "content_hash": content_hash,
+        }
+
+        # Ajout du numéro de page pour les PDF
+        if page is not None:
+            metadata["page"] = int(page)
+
+        # Identifiant stable du document
+        if page is not None:
+            document_id = f"{file_hash}:page:{page}"
+        else:
+            document_id = file_hash
+
+        metadata["document_id"] = document_id
+
+        return metadata

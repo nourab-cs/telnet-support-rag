@@ -2,18 +2,18 @@
 Package RAG (Retrieval-Augmented Generation) pour TELNET Support Bot.
 
 Ce package contient tous les modules nécessaires au pipeline RAG:
-- DocumentLoader: Chargement de documents
-- Chunker: Chunking 
-- Embedder: Génération d'embeddings
-- ChromaStore: Base vectorielle ChromaDB
-- Retriever: Récupération sémantique
-- Generator: Génération de réponses
-- Pipeline: Pipeline RAG complet
-- ConversationHistory: Gestion de l'historique conversationnel
+|- DocumentLoader: Chargement de documents
+|- ChunkingAgent: Chunking intelligent
+|- Embedder: Génération d'embeddings
+|- ChromaStore: Base vectorielle ChromaDB
+|- Retriever: Récupération sémantique
+|- Generator: Génération de réponses
+|- RAGPipeline: Pipeline RAG complet
+|- ConversationHistory: Gestion de l'historique conversationnel
 """
 
 from .document_loader import DocumentLoader
-from .semantic_chunker import SemanticChunking
+from .chunking_agent import ChunkingAgent
 from .embedder import Embedder
 from .chroma_store import ChromaStore
 from .retriever import Retriever
@@ -23,7 +23,7 @@ from .conversation_history import ConversationHistory
 
 __all__ = [
     "DocumentLoader",
-    "SemanticChunking",
+    "ChunkingAgent",
     "Embedder",
     "ChromaStore",
     "Retriever",
