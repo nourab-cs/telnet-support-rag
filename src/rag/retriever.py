@@ -35,6 +35,7 @@ class Retriever:
         score_threshold: float = 0.40,
         fetch_k: int = 20,
         lambda_mult: float = 0.6,
+        enable_tracing: bool = True,
     ):
         if vectordb is None:
             raise ValueError(
@@ -73,7 +74,7 @@ class Retriever:
         self.score_threshold = score_threshold
         self.fetch_k = max(fetch_k, k)
         self.lambda_mult = lambda_mult
-
+        self.enable_tracing = enable_tracing
         self.retriever = self._build_retriever()
 
         logger.info(

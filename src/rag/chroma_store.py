@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -11,18 +12,19 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 
+logger = logging.getLogger(__name__)
+
+
 class ChromaStore:
     """
     Gestion de la base vectorielle ChromaDB.
 
     Responsabilités :
-    - vérifier l'existence de l'index
-    - calculer la signature du corpus
-    - vérifier la compatibilité
-    - créer/reconstruire l'index
-    - charger un index existant
-    - gérer le manifest
-    - supprimer l'index
+    - création de l'index
+    - chargement de l'index
+    - vérification de compatibilité
+    - gestion du manifest
+    - suppression de l'index
     """
 
     MANIFEST_VERSION = 1
@@ -32,9 +34,15 @@ class ChromaStore:
         self,
         persist_directory: str,
         collection_name: str = "telnet_support",
-    ):
-        self.persist_directory = Path(persist_directory)
+    ) -> None:
+
+        self.persist_directory = Path(
+            persist_directory
+        )
+
         self.collection_name = collection_name
+
+        self.vectorstore: Optional[Chroma] = None
 
     # ============================================================
     # MANIFEST
@@ -42,12 +50,13 @@ class ChromaStore:
 
     @property
     def manifest_path(self) -> Path:
-        return self.persist_directory / self.MANIFEST_FILENAME
+
+        return (
+            self.persist_directory
+            / self.MANIFEST_FILENAME
+        )
 
     def exists(self) -> bool:
-        """
-        Vérifie si un index Chroma complet existe.
-        """
 
         return (
             self.persist_directory.exists()
@@ -55,33 +64,29 @@ class ChromaStore:
         )
 
     def get_manifest(self) -> dict:
-        """
-        Retourne le manifest actuel.
-        """
 
         if not self.manifest_path.exists():
             return {}
 
         try:
             return self._load_manifest()
+
         except Exception:
+
+            logger.exception(
+                "Impossible de charger le manifest."
+            )
+
             return {}
 
     # ============================================================
-    # SIGNATURE DU CORPUS
+    # SIGNATURE CORPUS
     # ============================================================
 
     def compute_corpus_signature(
         self,
         documents: List[Document],
     ) -> str:
-        """
-        Calcule une signature stable du corpus.
-
-        La signature dépend :
-        - du chemin du document
-        - du hash du document
-        """
 
         entries = []
         seen = set()
@@ -142,10 +147,6 @@ class ChromaStore:
         embedding_model: str,
         chunking_version: str,
     ) -> bool:
-        """
-        Vérifie si l'index actuel correspond
-        au corpus et aux paramètres d'indexation.
-        """
 
         if not self.exists():
             return False
@@ -174,31 +175,36 @@ class ChromaStore:
             )
 
         except Exception:
+
+            logger.exception(
+                "Erreur lors de la vérification "
+                "de compatibilité."
+            )
+
             return False
 
     # ============================================================
-    # CHARGEMENT
+    # LOAD
     # ============================================================
 
     def load(
         self,
         embeddings,
     ) -> Chroma:
-        """
-        Charge une base Chroma existante.
-        """
 
         if not self.persist_directory.exists():
+
             raise FileNotFoundError(
                 "La base Chroma n'existe pas."
             )
 
         if not self.manifest_path.exists():
+
             raise FileNotFoundError(
                 "Manifest Chroma introuvable."
             )
 
-        return Chroma(
+        self.vectorstore = Chroma(
             collection_name=self.collection_name,
             embedding_function=embeddings,
             persist_directory=str(
@@ -206,11 +212,18 @@ class ChromaStore:
             ),
         )
 
+        logger.info(
+            "Chroma chargé | collection=%s",
+            self.collection_name,
+        )
+
+        return self.vectorstore
+
     # ============================================================
-    # CREATION
+    # CREATE
     # ============================================================
 
-    def create_or_replace(
+    def create(
         self,
         chunks: List[Document],
         embeddings,
@@ -218,17 +231,15 @@ class ChromaStore:
         embedding_model: str = "",
         chunking_version: str = "",
     ) -> Chroma:
-        """
-        Supprime l'ancien index et crée un nouvel index.
-        """
 
         if not chunks:
+
             raise ValueError(
                 "Impossible de créer Chroma sans chunks."
             )
 
-        # Supprimer ancien index
         if self.persist_directory.exists():
+
             shutil.rmtree(
                 self.persist_directory,
                 ignore_errors=True,
@@ -239,15 +250,15 @@ class ChromaStore:
             exist_ok=True,
         )
 
-        # IDs déterministes
         ids = self._build_chunk_ids(chunks)
 
-        print(
-            f"Création de Chroma avec "
-            f"{len(chunks)} chunks..."
+        logger.info(
+            "Création Chroma | chunks=%d | collection=%s",
+            len(chunks),
+            self.collection_name,
         )
 
-        vectordb = Chroma.from_documents(
+        self.vectorstore = Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
             ids=ids,
@@ -257,7 +268,6 @@ class ChromaStore:
             ),
         )
 
-        # Manifest
         manifest = {
             "version": self.MANIFEST_VERSION,
             "collection_name": self.collection_name,
@@ -281,12 +291,30 @@ class ChromaStore:
 
         self._save_manifest(manifest)
 
-        print(
-            f"[OK] Base vectorielle créée : "
-            f"{len(chunks)} chunks"
+        logger.info(
+            "Base vectorielle créée | chunks=%d",
+            len(chunks),
         )
 
-        return vectordb
+        return self.vectorstore
+
+    # Compatibilité avec ton ancien code
+    def create_or_replace(
+        self,
+        chunks: List[Document],
+        embeddings,
+        documents: Optional[List[Document]] = None,
+        embedding_model: str = "",
+        chunking_version: str = "",
+    ) -> Chroma:
+
+        return self.create(
+            chunks=chunks,
+            embeddings=embeddings,
+            documents=documents,
+            embedding_model=embedding_model,
+            chunking_version=chunking_version,
+        )
 
     # ============================================================
     # IDS
@@ -296,9 +324,6 @@ class ChromaStore:
     def _build_chunk_ids(
         chunks: List[Document],
     ) -> List[str]:
-        """
-        Génère des IDs déterministes.
-        """
 
         ids = []
 
@@ -330,7 +355,7 @@ class ChromaStore:
         return ids
 
     # ============================================================
-    # MANIFEST INTERNE
+    # MANIFEST
     # ============================================================
 
     def _save_manifest(
@@ -361,13 +386,10 @@ class ChromaStore:
         )
 
     # ============================================================
-    # SUPPRESSION
+    # DELETE
     # ============================================================
 
     def delete(self) -> None:
-        """
-        Supprime complètement l'index.
-        """
 
         if self.persist_directory.exists():
 
@@ -376,4 +398,8 @@ class ChromaStore:
                 ignore_errors=True,
             )
 
-        print("[OK] Index Chroma supprimé.")
+        self.vectorstore = None
+
+        logger.info(
+            "Index Chroma supprimé."
+        )

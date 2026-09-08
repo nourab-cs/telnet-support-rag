@@ -20,6 +20,7 @@ from .retriever import Retriever
 from .generator import Generator
 from .pipeline import RAGPipeline
 from .conversation_history import ConversationHistory
+from .query_rewriter import QueryRewriter
 
 __all__ = [
     "DocumentLoader",
@@ -30,4 +31,5 @@ __all__ = [
     "Generator",
     "RAGPipeline",
     "ConversationHistory",
+    "QueryRewriter",
 ]

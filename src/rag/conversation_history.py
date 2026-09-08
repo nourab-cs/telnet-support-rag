@@ -1,312 +1,486 @@
-"""
-Gestion de l'historique de conversation pour le RAG conversationnel.
+from __future__ import annotations
 
-Ce module permet de maintenir le contexte des conversations précédentes
-pour améliorer les réponses avec mémoire.
-"""
-
-from typing import List, Dict, Optional
-from datetime import datetime
 import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationHistory:
     """
-    Gère l'historique des conversations avec les messages utilisateur et assistant.
+    Gestion de l'historique d'une conversation.
+
+    Responsabilités :
+    - stocker les messages ;
+    - conserver les rôles user/assistant ;
+    - limiter la taille de l'historique ;
+    - fournir un contexte au QueryRewriter ;
+    - fournir un contexte au Generator ;
+    - sauvegarder / charger une conversation.
+
+    Cette classe ne contient aucune logique de compréhension
+    des questions.
     """
 
-    def __init__(self, max_history: int = 10):
-        """
-        Initialise l'historique de conversation.
+    def __init__(
+        self,
+        max_history: int = 10,
+        max_context_chars: int = 6000,
+    ) -> None:
 
-        Args:
-            max_history: Nombre maximum de paires question-réponse à conserver
-        """
         self.max_history = max_history
-        self.messages: List[Dict[str, str]] = []
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.max_context_chars = max_context_chars
 
-    def add_message(self, role: str, content: str, sources: Optional[List[str]] = None):
-        """
-        Ajoute un message à l'historique.
+        self.messages: List[Dict[str, Any]] = []
 
-        Args:
-            role: "user" ou "assistant"
-            content: Contenu du message
-            sources: Sources utilisées pour la réponse (assistant uniquement)
-        """
-        message = {
+        self.session_id = datetime.now().strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+
+        logger.info(
+            "ConversationHistory initialisée | session=%s | "
+            "max_history=%d | max_context_chars=%d",
+            self.session_id,
+            self.max_history,
+            self.max_context_chars,
+        )
+
+    # ============================================================
+    # AJOUT DES MESSAGES
+    # ============================================================
+
+    def add_message(
+        self,
+        role: str,
+        content: str,
+        sources: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+
+        if role not in {"user", "assistant", "system"}:
+            raise ValueError(
+                f"Role invalide: {role}. "
+                f"Utiliser user, assistant ou system."
+            )
+
+        content = (content or "").strip()
+
+        if not content:
+            return
+
+        message: Dict[str, Any] = {
             "role": role,
             "content": content,
             "timestamp": datetime.now().isoformat(),
         }
 
-        if sources and role == "assistant":
+        if sources:
             message["sources"] = sources
 
         self.messages.append(message)
 
-        # Garder seulement les max_history derniers messages
-        if len(self.messages) > self.max_history * 2:  # *2 car on compte les paires
-            self.messages = self.messages[-self.max_history * 2:]
+        self._trim_history()
 
-    def add_user_message(self, question: str):
-        """Ajoute une question utilisateur."""
-        self.add_message("user", question)
+    def add_user_message(self, content: str) -> None:
+        self.add_message("user", content)
 
-    def add_assistant_message(self, answer: str, sources: Optional[List[str]] = None):
-        """Ajoute une réponse assistant."""
-        self.add_message("assistant", answer, sources if sources else [])
+    def add_assistant_message(
+        self,
+        content: str,
+        sources: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self.add_message(
+            "assistant",
+            content,
+            sources=sources,
+        )
 
-    def get_history(self, last_n: Optional[int] = None) -> List[Dict[str, str]]:
+    # ============================================================
+    # LIMITATION DE L'HISTORIQUE
+    # ============================================================
+
+    def _trim_history(self) -> None:
         """
-        Récupère l'historique des messages.
+        Conserve au maximum max_history échanges.
 
-        Args:
-            last_n: Nombre de messages à retourner (None = tous)
-
-        Returns:
-            Liste des messages
+        Un échange = question utilisateur + réponse assistant.
         """
-        if last_n:
-            return self.messages[-last_n:]
-        return self.messages
 
-    def get_formatted_history(self, last_n: Optional[int] = None) -> str:
-        """
-        Formate l'historique pour inclusion dans un prompt.
+        max_messages = self.max_history * 2
 
-        Args:
-            last_n: Nombre de messages à formater
+        if len(self.messages) > max_messages:
+            self.messages = self.messages[-max_messages:]
 
-        Returns:
-            Chaîne formatée de l'historique
-        """
+    # ============================================================
+    # LECTURE
+    # ============================================================
+
+    def get_history(
+        self,
+        last_n: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+
+        if last_n is None:
+            return list(self.messages)
+
+        return list(self.messages[-last_n:])
+
+    def get_formatted_history(
+        self,
+        last_n: Optional[int] = None,
+    ) -> str:
+
         messages = self.get_history(last_n)
-        formatted = []
 
-        for msg in messages:
-            if msg["role"] == "user":
-                formatted.append(f"Utilisateur: {msg['content']}")
+        if not messages:
+            return ""
+
+        lines = []
+
+        for message in messages:
+            role = message["role"]
+
+            if role == "user":
+                label = "Utilisateur"
+            elif role == "assistant":
+                label = "Assistant"
             else:
-                formatted.append(f"Assistant: {msg['content']}")
+                label = "Système"
 
-        return "\n".join(formatted)
+            lines.append(
+                f"{label}: {message['content']}"
+            )
+
+        return "\n".join(lines)
 
     def format_history(self) -> str:
-        """
-        Formate l'historique complet pour affichage.
-
-        Returns:
-            Chaîne formatée de l'historique
-        """
         return self.get_formatted_history()
 
-    def get_recent_questions(self, n: int = 2) -> List[str]:
+    # ============================================================
+    # CONTEXTE POUR QUERY REWRITER
+    # ============================================================
+
+    def get_context_for_rewriting(
+        self,
+        max_chars: int = 4000,
+        max_messages: int = 6,
+    ) -> str:
         """
-        Récupère les n dernières questions posées.
+        Retourne uniquement les derniers messages utiles au
+        QueryRewriter.
 
-        Args:
-            n: Nombre de questions à récupérer
-
-        Returns:
-            Liste des questions récentes
+        On évite de transmettre une conversation énorme au LLM.
         """
-        questions = []
-        for msg in reversed(self.messages):
-            if msg["role"] == "user":
-                questions.append(msg["content"])
-                if len(questions) >= n:
-                    break
-        return list(reversed(questions))
 
-    def get_summary(self) -> str:
-        """
-        Génère un résumé de la conversation.
+        messages = self.messages[-max_messages:]
 
-        Returns:
-            Résumé textuel de la conversation
-        """
-        return self.get_conversation_summary()
-
-    def get_context_for_prompt(self, max_chars: int = 2000) -> str:
-        """
-        Récupère l'historique formaté en limitant la taille pour le prompt.
-
-        Args:
-            max_chars: Nombre maximum de caractères (approximation)
-
-        Returns:
-            Historique formaté limité
-        """
-        formatted = self.get_formatted_history()
-        
-        if len(formatted) <= max_chars:
-            return formatted
-        
-        # Tronquer si trop long (garder les messages les plus récents)
-        return formatted[-max_chars:]
-
-    def get_context_summary(self, max_pairs: int = 3) -> str:
-        """
-        Génère un résumé de l'historique pour le contexte.
-
-        Args:
-            max_pairs: Nombre maximum de paires question-réponse à inclure
-
-        Returns:
-            Résumé formaté de l'historique
-        """
-        if not self.messages:
+        if not messages:
             return ""
-        
-        # Récupérer les dernières paires
-        recent_messages = self.messages[-(max_pairs * 2):]
-        
-        summary_parts = []
-        for msg in recent_messages:
-            if msg["role"] == "user":
-                summary_parts.append(f"Question: {msg['content']}")
-            else:
-                summary_parts.append(f"Réponse: {msg['content'][:200]}...")  # Limiter la longueur des réponses
-        
-        return "\n".join(summary_parts)
 
-    def clear(self):
-        """Efface tout l'historique."""
-        self.messages = []
+        lines = []
+
+        for message in messages:
+            role = message["role"]
+
+            if role == "user":
+                label = "Utilisateur"
+            elif role == "assistant":
+                label = "Assistant"
+            else:
+                label = "Système"
+
+            lines.append(
+                f"{label}: {message['content']}"
+            )
+
+        context = "\n".join(lines)
+
+        if len(context) > max_chars:
+            context = context[-max_chars:]
+
+        return context
+
+    # ============================================================
+    # CONTEXTE POUR GENERATOR
+    # ============================================================
+
+    def get_context_for_prompt(
+        self,
+        max_chars: Optional[int] = None,
+    ) -> str:
+
+        if max_chars is None:
+            max_chars = self.max_context_chars
+
+        context = self.get_formatted_history()
+
+        if len(context) <= max_chars:
+            return context
+
+        return context[-max_chars:]
+
+    # ============================================================
+    # QUESTIONS RECENTES
+    # ============================================================
+
+    def get_recent_questions(
+        self,
+        n: int = 2,
+    ) -> List[str]:
+
+        questions = [
+            message["content"]
+            for message in self.messages
+            if message["role"] == "user"
+        ]
+
+        return questions[-n:]
 
     def get_last_question(self) -> Optional[str]:
-        """Récupère la dernière question posée."""
-        for msg in reversed(self.messages):
-            if msg["role"] == "user":
-                return msg["content"]
+
+        for message in reversed(self.messages):
+            if message["role"] == "user":
+                return message["content"]
+
         return None
 
     def get_last_answer(self) -> Optional[str]:
-        """Récupère la dernière réponse donnée."""
-        for msg in reversed(self.messages):
-            if msg["role"] == "assistant":
-                return msg["content"]
+
+        for message in reversed(self.messages):
+            if message["role"] == "assistant":
+                return message["content"]
+
         return None
 
-    def get_conversation_summary(self) -> str:
-        """
-        Génère un résumé de la conversation.
+    # ============================================================
+    # RESUME
+    # ============================================================
 
-        Returns:
-            Résumé textuel de la conversation
-        """
-        if not self.messages:
-            return "Aucune conversation en cours."
+    def get_context_summary(
+        self,
+        max_pairs: int = 3,
+    ) -> str:
 
-        user_questions = [msg["content"] for msg in self.messages if msg["role"] == "user"]
-        assistant_answers = [msg["content"] for msg in self.messages if msg["role"] == "assistant"]
+        messages = self.messages[-(max_pairs * 2):]
 
-        return f"""
-Session: {self.session_id}
-Questions posées: {len(user_questions)}
-Réponses données: {len(assistant_answers)}
-Dernière question: {user_questions[-1] if user_questions else 'N/A'}
-        """.strip()
+        if not messages:
+            return ""
 
-    def save_to_file(self, filepath: str):
-        """
-        Sauvegarde l'historique dans un fichier JSON.
+        lines = []
 
-        Args:
-            filepath: Chemin du fichier de sauvegarde
-        """
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump({
-                "session_id": self.session_id,
-                "messages": self.messages
-            }, f, ensure_ascii=False, indent=2)
+        for message in messages:
 
-    def load_from_file(self, filepath: str):
-        """
-        Charge l'historique depuis un fichier JSON.
+            role = (
+                "Utilisateur"
+                if message["role"] == "user"
+                else "Assistant"
+            )
 
-        Args:
-            filepath: Chemin du fichier à charger
-        """
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            self.session_id = data.get("session_id", self.session_id)
-            self.messages = data.get("messages", [])
+            lines.append(
+                f"{role}: {message['content']}"
+            )
+
+        return "\n".join(lines)
+
+    def get_conversation_summary(
+        self,
+        max_pairs: int = 3,
+    ) -> str:
+        return self.get_context_summary(max_pairs)
+
+    def get_summary(
+        self,
+        max_pairs: int = 3,
+    ) -> str:
+        return self.get_conversation_summary(max_pairs)
+
+    # ============================================================
+    # GESTION
+    # ============================================================
+
+    def clear(self) -> None:
+        self.messages.clear()
+
+        logger.info(
+            "Historique effacé | session=%s",
+            self.session_id,
+        )
+
+    # ============================================================
+    # PERSISTENCE
+    # ============================================================
+
+    def save(self, filepath: str) -> None:
+
+        path = Path(filepath)
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        data = {
+            "session_id": self.session_id,
+            "max_history": self.max_history,
+            "max_context_chars": self.max_context_chars,
+            "messages": self.messages,
+        }
+
+        with path.open(
+            "w",
+            encoding="utf-8",
+        ) as file:
+
+            json.dump(
+                data,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        logger.info(
+            "Historique sauvegardé | path=%s",
+            filepath,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        filepath: str,
+    ) -> "ConversationHistory":
+
+        path = Path(filepath)
+
+        with path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            data = json.load(file)
+
+        history = cls(
+            max_history=data.get(
+                "max_history",
+                10,
+            ),
+            max_context_chars=data.get(
+                "max_context_chars",
+                6000,
+            ),
+        )
+
+        history.session_id = data.get(
+            "session_id",
+            history.session_id,
+        )
+
+        history.messages = data.get(
+            "messages",
+            [],
+        )
+
+        history._trim_history()
+
+        return history
+
+    # ============================================================
+    # UTILITAIRES
+    # ============================================================
 
     def __len__(self) -> int:
-        """Nombre de messages dans l'historique."""
         return len(self.messages)
 
     def __repr__(self) -> str:
-        return f"ConversationHistory(session_id={self.session_id}, messages={len(self.messages)})"
+        return (
+            f"ConversationHistory("
+            f"session_id={self.session_id!r}, "
+            f"messages={len(self.messages)})"
+        )
 
 
 class ConversationMemory:
     """
-    Gestionnaire de mémoire pour plusieurs sessions de conversation.
+    Gestion de plusieurs sessions de conversation.
     """
 
-    def __init__(self, max_sessions: int = 5):
-        """
-        Initialise la mémoire de conversation.
+    def __init__(
+        self,
+        max_sessions: int = 5,
+        max_history: int = 10,
+        max_context_chars: int = 6000,
+    ) -> None:
 
-        Args:
-            max_sessions: Nombre maximum de sessions à conserver
-        """
         self.max_sessions = max_sessions
-        self.sessions: Dict[str, ConversationHistory] = {}
-        self.current_session: Optional[str] = None
+        self.max_history = max_history
+        self.max_context_chars = max_context_chars
 
-    def create_session(self, session_id: Optional[str] = None) -> str:
-        """
-        Crée une nouvelle session de conversation.
+        self.sessions: Dict[
+            str,
+            ConversationHistory
+        ] = {}
 
-        Args:
-            session_id: ID de session personnalisé (auto-généré si None)
+        self.current_session_id: Optional[str] = None
 
-        Returns:
-            ID de la session créée
-        """
-        if not session_id:
-            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    def create_session(self) -> ConversationHistory:
 
-        self.sessions[session_id] = ConversationHistory()
-        self.current_session = session_id
-        return session_id
+        history = ConversationHistory(
+            max_history=self.max_history,
+            max_context_chars=self.max_context_chars,
+        )
 
-    def get_current_session(self) -> Optional[ConversationHistory]:
-        """Récupère la session actuelle."""
-        if self.current_session and self.current_session in self.sessions:
-            return self.sessions[self.current_session]
-        return None
+        self.sessions[history.session_id] = history
+        self.current_session_id = history.session_id
 
-    def switch_session(self, session_id: str) -> bool:
-        """
-        Change de session active.
+        self._trim_sessions()
 
-        Args:
-            session_id: ID de la session à activer
+        return history
 
-        Returns:
-            True si succès, False si session inexistante
-        """
-        if session_id in self.sessions:
-            self.current_session = session_id
-            return True
-        return False
+    def get_current_session(self) -> ConversationHistory:
 
-    def delete_session(self, session_id: str):
-        """Supprime une session."""
+        if self.current_session_id is None:
+            return self.create_session()
+
+        if self.current_session_id not in self.sessions:
+            return self.create_session()
+
+        return self.sessions[self.current_session_id]
+
+    def switch_session(
+        self,
+        session_id: str,
+    ) -> ConversationHistory:
+
+        if session_id not in self.sessions:
+            raise ValueError(
+                f"Session inconnue: {session_id}"
+            )
+
+        self.current_session_id = session_id
+
+        return self.sessions[session_id]
+
+    def delete_session(
+        self,
+        session_id: str,
+    ) -> None:
+
         if session_id in self.sessions:
             del self.sessions[session_id]
-            if self.current_session == session_id:
-                self.current_session = None
+
+        if self.current_session_id == session_id:
+            self.current_session_id = None
 
     def list_sessions(self) -> List[str]:
-        """Liste les IDs des sessions disponibles."""
         return list(self.sessions.keys())
 
-    def __repr__(self) -> str:
-        return f"ConversationMemory(sessions={len(self.sessions)}, current={self.current_session})"
+    def _trim_sessions(self) -> None:
+
+        while len(self.sessions) > self.max_sessions:
+
+            oldest_session = next(
+                iter(self.sessions)
+            )
+
+            del self.sessions[oldest_session]

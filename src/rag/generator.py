@@ -1,33 +1,59 @@
-from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.documents import Document
-from typing import Optional, List
-import re
+
+from __future__ import annotations
+
 import logging
+import re
+from typing import List, Optional
+
+from langchain_ollama import ChatOllama
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+
 
 logger = logging.getLogger(__name__)
 
 
 class Generator:
     """
-    Gère le LLM et la chaîne RAG avec l'API moderne LCEL et prompts améliorés.
+    Générateur de réponses RAG avec Mistral/Ollama.
+
+    Le Generator ne réalise PAS la recherche documentaire.
+
+    Le Retriever est exécuté par le Pipeline, puis les documents
+    pertinents sont transmis à :
+
+        generate(
+            question,
+            documents,
+            history
+        )
+
+    Architecture :
+
+        Retriever
+             ↓
+        Documents
+             ↓
+        Generator
+             ↓
+        Mistral
+             ↓
+        Answer
     """
 
-    FALLBACK_MESSAGE = "Je ne trouve pas cette information dans la documentation."
+    FALLBACK_MESSAGE = (
+        "Je ne trouve pas cette information "
+        "dans la documentation."
+    )
 
     def __init__(
         self,
-        retriever,
         model_name: str = "mistral",
         temperature: float = 0.0,
         num_predict: int = 512,
-    ):
+    ) -> None:
 
-        self.retriever = retriever
-        self.use_history = False
-        self.chain = None
         self.model_name = model_name
 
         self.llm = ChatOllama(
@@ -36,249 +62,440 @@ class Generator:
             num_predict=num_predict,
         )
 
-    def create_chain(self, use_history: bool = False):
+        logger.info(
+            "Generator initialisé | model=%s | "
+            "temperature=%.2f | num_predict=%d",
+            model_name,
+            temperature,
+            num_predict,
+        )
 
-        # Template amélioré et équilibré
-        if use_history:
-            template = """Tu es l'assistant technique du support TELNET SmartConnect.
+    # ============================================================
+    # FORMAT DOCUMENTS
+    # ============================================================
 
-CONTEXTE DOCUMENTAIRE:
-{context}
+    def format_docs(
+        self,
+        docs: List[Document],
+    ) -> str:
+        """
+        Formatage simple des documents.
+        """
 
-Historique de conversation:
-{history}
+        if not docs:
+            return ""
 
-QUESTION:
-{question}
+        return "\n\n".join(
+            (
+                doc.page_content or ""
+            ).strip()
+            for doc in docs
+        )
 
-Réponds en français en te basant sur le contexte documentaire. Si l'information n'est pas dans le contexte, indique-le clairement. Sois précis et utile."""
-        else:
-            template = """Tu es l'assistant technique du support TELNET SmartConnect.
+    def format_docs_improved(
+        self,
+        docs: List[Document],
+    ) -> str:
+        """
+        Formatage amélioré avec métadonnées et scores.
+        """
 
-CONTEXTE DOCUMENTAIRE:
-{context}
-
-QUESTION:
-{question}
-
-Réponds en français en te basant sur le contexte documentaire. Si l'information n'est pas dans le contexte, indique-le clairement. Sois précis et utile."""
-
-        prompt = ChatPromptTemplate.from_template(template)
-
-        # Créer la chaîne avec l'API LCEL moderne
-        if use_history:
-            self.chain = (
-                {
-                    "context": self.retriever | self.format_docs_improved,
-                    "question": RunnablePassthrough(),
-                    "history": lambda x: x.get("history", "")
-                }
-                | prompt
-                | self.llm
-                | StrOutputParser()
-            )
-        else:
-            self.chain = (
-                {
-                    "context": self.retriever | self.format_docs_improved,
-                    "question": RunnablePassthrough()
-                }
-                | prompt
-                | self.llm
-                | StrOutputParser()
-            )
-
-        self.use_history = use_history
-        return self
-
-    def format_docs(self, docs):
-        """Formatage simple (ancienne méthode)."""
-        return "\n\n".join(doc.page_content for doc in docs)
-
-    def format_docs_improved(self, docs: List[Document]) -> str:
-        """Formatage amélioré avec métadonnées et scores."""
         if not docs:
             return ""
 
         sections = []
-        for index, doc in enumerate(docs, start=1):
-            metadata = doc.metadata
-            filename = metadata.get("filename") or metadata.get("source", "source inconnue")
-            score = metadata.get("retrieval_score")
 
-            header = f"[Document {index} - {filename}"
+        for index, doc in enumerate(
+            docs,
+            start=1,
+        ):
+
+            metadata = (
+                doc.metadata or {}
+            )
+
+            filename = (
+                metadata.get("filename")
+                or metadata.get("source")
+                or "source inconnue"
+            )
+
+            score = metadata.get(
+                "retrieval_score"
+            )
+
+            header = (
+                f"[Document {index} - {filename}"
+            )
+
             if score is not None:
-                header += f" (pertinence: {score:.2f})"
+
+                try:
+
+                    header += (
+                        f" | pertinence: "
+                        f"{float(score):.2f}"
+                    )
+
+                except (TypeError, ValueError):
+                    pass
+
             header += "]"
 
-            section = f"{header}\n{doc.page_content.strip()}"
-            sections.append(section)
+            content = (
+                doc.page_content or ""
+            ).strip()
 
-        return "\n\n---\n\n".join(sections)
+            sections.append(
+                f"{header}\n{content}"
+            )
 
-    def _contains_suspicious_content(self, text: str) -> bool:
-        """Détecte du contenu suspect (maths, hors sujet, etc.)."""
+        return "\n\n---\n\n".join(
+            sections
+        )
+
+    # ============================================================
+    # VALIDATION
+    # ============================================================
+
+    def _contains_suspicious_content(
+        self,
+        text: str,
+    ) -> bool:
+        """
+        Détecte certaines sorties manifestement hors sujet.
+        """
+
         suspicious_patterns = [
-            r'Let\s+\w+\s*=',
-            r'Suppose\s+',
-            r'Question:\s*Let',
-            r'What\s+is\s+the\s+\d+\s*\+\s*\d+',  # Only catch obvious math problems
+            r"Let\s+\w+\s*=",
+            r"Suppose\s+",
+            r"Question:\s*Let",
+            r"What\s+is\s+the\s+\d+\s*\+\s*\d+",
         ]
 
         for pattern in suspicious_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                logger.warning(f"Contenu suspect détecté avec pattern: {pattern}")
+
+            if re.search(
+                pattern,
+                text,
+                re.IGNORECASE,
+            ):
+
+                logger.warning(
+                    "Contenu suspect détecté | pattern=%s",
+                    pattern,
+                )
+
                 return True
 
         return False
-    
-    def _validate_response_length(self, text: str, max_length: int = 1000) -> bool:
-        """Valide la longueur de la réponse."""
+
+    def _validate_response_length(
+        self,
+        text: str,
+        max_length: int = 1000,
+    ) -> bool:
+        """
+        Vérifie que la réponse n'est pas excessivement longue.
+        """
+
         if len(text) > max_length:
-            logger.warning(f"Réponse trop longue: {len(text)} > {max_length} caractères")
+
+            logger.warning(
+                "Réponse trop longue | "
+                "length=%d | max=%d",
+                len(text),
+                max_length,
+            )
+
             return False
+
         return True
-    
-    def _validate_response_quality(self, text: str) -> bool:
-        """Valide la qualité de la réponse."""
-        # Vérifier que la réponse n'est pas vide
+
+    def _validate_response_quality(
+        self,
+        text: str,
+    ) -> bool:
+        """
+        Vérifications basiques de qualité.
+        """
+
         if not text or not text.strip():
-            logger.warning("Réponse vide")
+
+            logger.warning(
+                "Réponse vide."
+            )
+
             return False
-        
-        # Vérifier que ce n'est pas le message d'erreur standard répété
-        if text.count("Je ne trouve pas cette information") > 1:
-            logger.warning("Message d'erreur répété")
+
+        if text.count(
+            "Je ne trouve pas cette information"
+        ) > 1:
+
+            logger.warning(
+                "Message fallback répété."
+            )
+
             return False
-        
-        # Vérifier qu'il n'y a pas de répétitions excessives
+
         words = text.split()
+
         if len(words) > 10:
-            unique_words = set(words)
-            if len(unique_words) / len(words) < 0.3:  # Moins de 30% de mots uniques
-                logger.warning("Trop de répétitions dans la réponse")
+
+            unique_words = set(
+                words
+            )
+
+            ratio = (
+                len(unique_words)
+                / len(words)
+            )
+
+            if ratio < 0.30:
+
+                logger.warning(
+                    "Répétitions excessives | ratio=%.2f",
+                    ratio,
+                )
+
                 return False
-        
+
         return True
 
-    def invoke(self, question: str, history: Optional[str] = None):
-        """Invoke the chain and return both result and sources"""
-        # Recreate chain only if history status changed
-        has_history = history and history.strip()
-        if self.chain is None or (has_history != self.use_history):
-            self.create_chain(use_history=has_history)
+    def _validate_response(
+        self,
+        result: str,
+    ) -> tuple[str, bool]:
+        """
+        Validation centrale de la réponse.
+        """
 
-        # Get sources first - use invoke instead of get_relevant_documents
-        sources = self.retriever.invoke(question)
+        result = (
+            result or ""
+        ).strip()
 
-        logger.info(f"{len(sources)} documents récupérés pour la question: {question}")
-        
-        # Debug: print retrieved context
-        if sources:
-            context_length = sum(len(doc.page_content) for doc in sources)
-            logger.info(f"Context length: {context_length} chars")
-            logger.info(f"Number of documents: {len(sources)}")
-            logger.debug(f"Context preview: {self.format_docs_improved(sources[:2])[:500]}")
+        quality_ok = (
+            self._validate_response_quality(
+                result
+            )
+        )
 
-        # Get the answer with history if provided
-        if has_history:
-            result = self.chain.invoke({"question": question, "history": history})
-        else:
-            result = self.chain.invoke(question)
+        suspicious = (
+            self._contains_suspicious_content(
+                result
+            )
+        )
 
-        # Valider la réponse
-        result = result.strip()
+        validation_passed = (
+            quality_ok
+            and not suspicious
+        )
 
-        # Validation allégée - seulement validation critique
-        validation_passed = True
-
-        # 1. Validation de contenu suspect (très stricte)
-        if self._validate_response_quality(result) and self._contains_suspicious_content(result):
-            logger.warning("Validation contenu suspect échouée")
-            validation_passed = False
-
-        # Utiliser le fallback seulement si validation échouée
         if not validation_passed:
-            logger.warning("Utilisation du message fallback suite à validation échouée")
+
+            logger.warning(
+                "Validation de la réponse échouée."
+            )
+
             result = self.FALLBACK_MESSAGE
 
-        return {
-            "result": result,
-            "source_documents": sources,
-            "validation_passed": validation_passed
-        }
+        return (
+            result,
+            validation_passed,
+        )
 
-    def generate(self, question: str, documents: List[Document], history: Optional[str] = None):
-        """Generate response using pre-retrieved documents (for new pipeline architecture)"""
-        # Format the documents for the prompt
-        context = self.format_docs_improved(documents)
-        
-        # Template amélioré et équilibré
-        if history and history.strip():
-            template = """Tu es l'assistant technique du support TELNET SmartConnect.
+    # ============================================================
+    # PROMPT
+    # ============================================================
 
-CONTEXTE DOCUMENTAIRE:
+    def _build_prompt(
+        self,
+        has_history: bool,
+    ) -> ChatPromptTemplate:
+        """
+        Construit le prompt RAG.
+        """
+
+        if has_history:
+
+            template = """
+Tu es l'assistant technique du support TELNET SmartConnect.
+
+Ta tâche est de répondre à la question de l'utilisateur
+en utilisant UNIQUEMENT les informations présentes dans
+le contexte documentaire.
+
+CONTEXTE DOCUMENTAIRE :
 {context}
 
-Historique de conversation:
+HISTORIQUE DE CONVERSATION :
 {history}
 
-QUESTION:
+QUESTION ACTUELLE :
 {question}
 
-Réponds en français en te basant sur le contexte documentaire. Si l'information n'est pas dans le contexte, indique-le clairement. Sois précis et utile."""
-        else:
-            template = """Tu es l'assistant technique du support TELNET SmartConnect.
+RÈGLES :
 
-CONTEXTE DOCUMENTAIRE:
+1. Réponds en français.
+2. Utilise prioritairement le contexte documentaire.
+3. L'historique sert uniquement à comprendre le contexte
+   conversationnel de la question.
+4. N'invente aucune information.
+5. Si la documentation ne permet pas de répondre,
+   indique clairement que l'information n'est pas disponible.
+6. Sois précis, direct et utile.
+7. Ne mentionne pas le processus interne de recherche.
+"""
+
+        else:
+
+            template = """
+Tu es l'assistant technique du support TELNET SmartConnect.
+
+Ta tâche est de répondre à la question de l'utilisateur
+en utilisant UNIQUEMENT les informations présentes dans
+le contexte documentaire.
+
+CONTEXTE DOCUMENTAIRE :
 {context}
 
-QUESTION:
+QUESTION :
 {question}
 
-Réponds en français en te basant sur le contexte documentaire. Si l'information n'est pas dans le contexte, indique-le clairement. Sois précis et utile."""
+RÈGLES :
 
-        prompt = ChatPromptTemplate.from_template(template)
-        
-        # Always pass a dictionary to the chain
+1. Réponds en français.
+2. Utilise uniquement les informations du contexte.
+3. N'invente aucune information.
+4. Si la documentation ne permet pas de répondre,
+   indique clairement que l'information n'est pas disponible.
+5. Sois précis, direct et utile.
+6. Ne mentionne pas le processus interne de recherche.
+"""
+
+        return ChatPromptTemplate.from_template(
+            template
+        )
+
+    # ============================================================
+    # GENERATE
+    # ============================================================
+
+    def generate(
+        self,
+        question: str,
+        documents: List[Document],
+        history: Optional[str] = None,
+    ) -> dict:
+        """
+        Génère une réponse à partir de documents
+        déjà récupérés par le Retriever.
+
+        Args:
+            question:
+                Question originale de l'utilisateur.
+
+            documents:
+                Documents sélectionnés par le Pipeline.
+
+            history:
+                Historique conversationnel formaté.
+        """
+
+        question = (
+            question or ""
+        ).strip()
+
+        if not question:
+
+            raise ValueError(
+                "La question ne peut pas être vide."
+            )
+
+        # --------------------------------------------------------
+        # CONTEXT
+        # --------------------------------------------------------
+
+        context = (
+            self.format_docs_improved(
+                documents
+            )
+        )
+
+        has_history = bool(
+            history
+            and history.strip()
+        )
+
+        prompt = self._build_prompt(
+            has_history=has_history
+        )
+
+        # --------------------------------------------------------
+        # INPUT
+        # --------------------------------------------------------
+
         input_data = {
             "context": context,
             "question": question,
-            "history": history if history and history.strip() else ""
+            "history": (
+                history
+                if has_history
+                else ""
+            ),
         }
-        
-        # Create chain for this specific context
+
+        # --------------------------------------------------------
+        # LCEL
+        # --------------------------------------------------------
+
         chain = (
-            {
-                "context": lambda x: x["context"],
-                "question": lambda x: x["question"],
-                "history": lambda x: x["history"]
-            }
-            | prompt
+            prompt
             | self.llm
             | StrOutputParser()
         )
-        
-        result = chain.invoke(input_data)
 
-        # Valider la réponse
-        result = result.strip()
+        logger.info(
+            "Génération LLM | "
+            "documents=%d | history=%s",
+            len(documents),
+            has_history,
+        )
 
-        # Validation allégée - seulement validation critique
-        validation_passed = True
+        # --------------------------------------------------------
+        # INVOKE
+        # --------------------------------------------------------
 
-        # 1. Validation de contenu suspect (très stricte)
-        if self._validate_response_quality(result) and self._contains_suspicious_content(result):
-            logger.warning("Validation contenu suspect échouée")
-            validation_passed = False
+        try:
 
-        # Utiliser le fallback seulement si validation échouée
-        if not validation_passed:
-            logger.warning("Utilisation du message fallback suite à validation échouée")
-            result = self.FALLBACK_MESSAGE
+            result = chain.invoke(
+                input_data
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Erreur pendant la génération LLM."
+            )
+
+            raise RuntimeError(
+                "Erreur pendant la génération "
+                "de la réponse."
+            ) from exc
+
+        # --------------------------------------------------------
+        # VALIDATION
+        # --------------------------------------------------------
+
+        result, validation_passed = (
+            self._validate_response(
+                result
+            )
+        )
 
         return {
             "answer": result,
             "source_documents": documents,
-            "validation_passed": validation_passed
+            "validation_passed": validation_passed,
         }
+
