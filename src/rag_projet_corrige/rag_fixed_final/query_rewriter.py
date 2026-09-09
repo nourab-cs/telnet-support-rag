@@ -1,40 +1,24 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_ollama import ChatOllama
 
 
 class QueryRewriter:
     """
-    Reformule une question conversationnelle en requête autonome
-    destinée au moteur de recherche du RAG.
+    Reformule uniquement les questions qui dépendent du contexte précédent.
 
-    Exemple conceptuel :
-
-        Historique :
-            "Comment installer SmartConnect ?"
-            "Il faut d'abord télécharger..."
-
-        Question :
-            "Et après ?"
-
-        Requête produite :
-            "Quelles sont les étapes à suivre après l'installation
-             de SmartConnect ?"
-
-    Le modèle ne répond PAS à la question.
-    Il reformule uniquement la requête.
-
-    Cette classe ne contient volontairement aucune règle métier
-    ni liste d'exemples.
+    La décision de savoir si la question dépend de l'historique est faite
+    dans RAGPipeline. Cette classe est donc appelée uniquement lorsque
+    la question a besoin d'être reformulée.
     """
 
     def __init__(
         self,
         model_name: str = "mistral",
         temperature: float = 0.0,
-        max_history_chars: int = 5000,
+        max_history_chars: int = 4000,
     ) -> None:
         self.model_name = model_name
         self.temperature = temperature
@@ -51,132 +35,138 @@ class QueryRewriter:
         history: Optional[str] = None,
     ) -> str:
         """
-        Transforme la question en requête autonome.
+        Transforme une question dépendante de l'historique en requête
+        autonome pour la recherche.
 
-        Si aucun historique n'est disponible, la question originale
-        est conservée.
+        La méthode ne doit jamais répondre à la question.
         """
+        original_question = (question or "").strip()
 
-        question = (question or "").strip()
+        if not original_question:
+            return original_question
 
-        if not question:
-            return ""
+        history_text = (history or "").strip()
 
-        if not history or not history.strip():
-            return question
+        if not history_text:
+            return original_question
 
-        history = history[-self.max_history_chars :]
+        # Limite la taille de l'historique utilisé par le rewriter.
+        history_text = history_text[-self.max_history_chars:]
 
         prompt = f"""
-Tu es un composant de reformulation d'un système RAG.
-
-Ta seule tâche est de transformer la question actuelle de l'utilisateur
-en une requête autonome, claire et explicite pouvant être envoyée
-directement à un moteur de recherche documentaire.
-
-Utilise l'historique uniquement pour comprendre le contexte
-conversationnel nécessaire.
-
-Tu dois notamment être capable de résoudre naturellement :
-- les pronoms ;
-- les références à un élément mentionné précédemment ;
-- les questions elliptiques ;
-- les formulations incomplètes ;
-- les dépendances avec les messages précédents.
-
-Règles importantes :
-
-1. Ne réponds PAS à la question.
-2. Retourne UNIQUEMENT la requête reformulée.
-3. N'invente aucune information.
-4. N'ajoute aucune information absente de la conversation.
-5. Ne change pas l'intention de l'utilisateur.
-6. Si la question est déjà autonome, conserve son intention
-   et reformule-la au minimum si nécessaire.
-7. La requête doit être adaptée à une recherche documentaire RAG.
-8. Ne mentionne pas l'historique dans ta réponse.
-9. Ne donne aucune explication.
-10. Ne donne aucun préambule.
+Tu es un module de reformulation de requêtes pour un moteur RAG.
 
 Historique de conversation :
-{history}
+{history_text}
 
 Question actuelle :
-{question}
+{original_question}
 
-Requête autonome :
-"""
+Ta tâche :
+- La question actuelle dépend déjà du contexte précédent.
+- Transforme-la uniquement en une requête de recherche autonome.
+- Conserve exactement l'intention de la question.
+- Utilise les informations utiles présentes dans l'historique pour remplacer
+  les pronoms ou références ambiguës.
+- N'ajoute aucune information qui n'est pas présente dans l'historique.
+- Ne réponds JAMAIS à la question.
+- Ne donne aucune commande, procédure, explication ou solution.
+- Retourne UNE SEULE phrase courte, adaptée à une recherche documentaire.
+- Maximum 15 mots.
+- N'utilise pas de guillemets ni de préfixe comme "Requête :".
+
+Exemples :
+
+Historique :
+Utilisateur : Comment installer SmartConnect ?
+Question : Comment vérifier son installation ?
+Sortie :
+Comment vérifier l'installation de SmartConnect ?
+
+Historique :
+Utilisateur : Le port utilisé par SmartConnect est 8443.
+Question : Comment en vérifier le port ?
+Sortie :
+Comment vérifier le port 8443 de SmartConnect ?
+
+Historique :
+Utilisateur : Comment installer SmartConnect ?
+Question : Lister les devices.
+Sortie :
+Lister les devices.
+
+Historique :
+Utilisateur : Comment installer SmartConnect ?
+Question : Comment faire une recherche ?
+Sortie :
+Comment faire une recherche ?
+
+Réponds uniquement avec la requête finale.
+""".strip()
 
         try:
             response = self.llm.invoke(prompt)
 
-            rewritten = self._extract_content(response)
-
-            if not rewritten:
-                return question
+            if hasattr(response, "content"):
+                rewritten = response.content
+            else:
+                rewritten = str(response)
 
             rewritten = self._clean_output(rewritten)
 
+            if not rewritten:
+                return original_question
+
             return rewritten
 
-        except Exception as exc:
-            return question
-
-    @staticmethod
-    def _extract_content(response) -> str:
-        """
-        Extrait le texte retourné par ChatOllama.
-        """
-
-        content = getattr(response, "content", response)
-
-        if isinstance(content, str):
-            return content.strip()
-
-        if isinstance(content, list):
-            parts = []
-
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-
-                elif isinstance(item, dict):
-                    text = item.get("text")
-
-                    if text:
-                        parts.append(str(text))
-
-            return " ".join(parts).strip()
-
-        return str(content).strip()
+        except Exception:
+            # En cas d'erreur du LLM, on conserve la question originale.
+            return original_question
 
     @staticmethod
     def _clean_output(text: str) -> str:
         """
-        Nettoyage léger de la sortie du modèle.
+        Nettoie la sortie du modèle sans modifier son sens.
         """
+        text = (text or "").strip()
 
-        text = text.strip()
+        if not text:
+            return ""
 
-        prefixes = [
-            "Requête autonome:",
-            "Requete autonome:",
-            "Query:",
-            "Standalone query:",
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
         ]
+
+        if not lines:
+            return ""
+
+        text = lines[0]
+
+        prefixes = (
+            "Requête :",
+            "Requete :",
+            "Requête:",
+            "Requete:",
+            "Query:",
+            "Query :",
+            "Réponse :",
+            "Reponse :",
+        )
 
         for prefix in prefixes:
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
+                break
 
-        if len(text) >= 2:
-            if (
-                text.startswith('"')
-                and text.endswith('"')
-            ) or (
-                text.startswith("'")
-                and text.endswith("'")
-            ):
-                text = text[1:-1].strip()
+        if (
+            len(text) >= 2
+            and text[0] == text[-1]
+            and text[0] in {'"', "'"}
+        ):
+            text = text[1:-1].strip()
+
+        text = " ".join(text.split())
 
         return text

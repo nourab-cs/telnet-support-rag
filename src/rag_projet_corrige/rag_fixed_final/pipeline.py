@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.documents import Document
+from langchain_ollama import ChatOllama
 
 from .document_loader import DocumentLoader
 from .embedder import Embedder
@@ -59,7 +61,7 @@ class RAGPipeline:
         retrieval_lambda: float = 0.6,
         hybrid_k: int = 10,
 
-        relevance_threshold: Optional[float] = 0.40,
+        relevance_threshold: Optional[float] = None,
         bm25_relevance_threshold: Optional[float] = None,
         hybrid_relevance_threshold: Optional[float] = None,
 
@@ -188,6 +190,17 @@ class RAGPipeline:
                 temperature=0.0,
                 max_history_chars=max_history_chars,
             )
+
+        # ========================================================
+        # QUESTION UNDERSTANDING
+        # ========================================================
+        # Petit appel LLM indépendant qui vérifie si la question
+        # est compréhensible AVANT le QueryRewriter.
+        self.question_validator = ChatOllama(
+            model=llm_model,
+            temperature=0.0,
+            num_predict=128,
+        )
 
     # ============================================================
     # INITIALISATION
@@ -326,6 +339,172 @@ class RAGPipeline:
             raise ValueError("Aucun chunk récupérable depuis l'index Chroma.")
 
         self._initialize_query_components()
+
+    # ============================================================
+    # QUESTION UNDERSTANDING
+    # ============================================================
+
+    def _check_question_understandability(
+        self,
+        question: str,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Détermine avec le LLM si la question est suffisamment
+        compréhensible pour être traitée par le RAG.
+
+        Important :
+        - cette étape intervient AVANT le QueryRewriter ;
+        - elle ne cherche pas la réponse ;
+        - elle vérifie uniquement si l'intention de l'utilisateur
+          peut être comprise ;
+        - une question courte mais claire ("JWT ?", "API ?")
+          peut être considérée comme compréhensible.
+        """
+
+        original_question = (
+            question or ""
+        ).strip()
+
+        if not original_question:
+            return (
+                False,
+                {
+                    "understandable": False,
+                    "reason": "empty_question",
+                },
+            )
+
+        prompt = f"""
+Tu es un classificateur de questions pour un chatbot de support
+TELNET SmartConnect.
+
+Ta seule tâche est de déterminer si la question de l'utilisateur
+est COMPRÉHENSIBLE, c'est-à-dire si son intention peut être
+identifiée suffisamment clairement pour lancer une recherche
+documentaire.
+
+Une question peut être courte et quand même être compréhensible.
+Exemples :
+- "JWT ?" -> compréhensible
+- "API ?" -> compréhensible
+- "Comment obtenir un token JWT ?" -> compréhensible
+- "Comment accéder aux données d'un device ?" -> compréhensible
+
+Une question est NON compréhensible si elle est manifestement
+aléatoire, vide de sens, composée de caractères sans intention
+identifiable ou trop ambiguë pour savoir ce que l'utilisateur
+demande.
+Exemples :
+- "jnkjl" -> non compréhensible
+- "vdvds" -> non compréhensible
+- "asdfgh" -> non compréhensible
+
+Ne juge pas si la question est vraie ou fausse.
+Ne cherche pas à répondre à la question.
+Ne la réécris pas.
+Juge uniquement sa compréhensibilité.
+
+Réponds UNIQUEMENT avec un JSON valide de cette forme :
+{{
+  "understandable": true ou false,
+  "reason": "courte explication"
+}}
+
+Question utilisateur :
+{original_question}
+"""
+
+        start = time.perf_counter()
+
+        try:
+            response = self.question_validator.invoke(prompt)
+
+            content = getattr(
+                response,
+                "content",
+                response,
+            )
+
+            if isinstance(content, list):
+                content = "".join(
+                    str(item)
+                    for item in content
+                )
+
+            content = str(content).strip()
+
+            # Nettoyage minimal si le modèle entoure le JSON
+            # avec ```json ... ```.
+            content = re.sub(
+                r"^```(?:json)?\s*",
+                "",
+                content,
+                flags=re.IGNORECASE,
+            )
+            content = re.sub(
+                r"\s*```$",
+                "",
+                content,
+            ).strip()
+
+            import json
+
+            result = json.loads(content)
+
+            understandable = result.get(
+                "understandable"
+            )
+
+            if isinstance(
+                understandable,
+                str,
+            ):
+                understandable = (
+                    understandable.lower()
+                    in {
+                        "true",
+                        "1",
+                        "yes",
+                        "oui",
+                    }
+                )
+
+            understandable = bool(
+                understandable
+            )
+
+            return (
+                understandable,
+                {
+                    "understandable": understandable,
+                    "reason": str(
+                        result.get(
+                            "reason",
+                            "",
+                        )
+                    ),
+                    "latency": (
+                        time.perf_counter()
+                        - start
+                    ),
+                },
+            )
+
+        except Exception as exc:
+            # En cas d'échec du classificateur, on ne bloque pas
+            # une vraie question : on laisse le pipeline continuer.
+            return (
+                True,
+                {
+                    "understandable": True,
+                    "reason": "validator_error_fallback",
+                    "error": str(exc),
+                    "latency": (
+                        time.perf_counter()
+                        - start
+                    ),
+                },
+            )
 
     # ============================================================
     # QUERY REWRITING
@@ -684,6 +863,74 @@ class RAGPipeline:
             history_text = ""
 
         # ========================================================
+        # QUESTION UNDERSTANDING
+        # ========================================================
+        # Cette vérification est volontairement placée AVANT
+        # le QueryRewriter.
+        (
+            question_understandable,
+            understanding_metadata,
+        ) = self._check_question_understandability(
+            question
+        )
+
+        if not question_understandable:
+
+            answer = (
+                "Je n'ai pas compris votre question. "
+                "Veuillez reformuler votre demande concernant "
+                "SmartConnect."
+            )
+
+            if self.use_history:
+                self.history.add_user_message(
+                    question
+                )
+                self.history.add_assistant_message(
+                    answer,
+                    sources=[],
+                )
+
+            return {
+                "answer": answer,
+                "question": question,
+                "search_query": question,
+                "documents": [],
+                "scores": [],
+                "source_documents": [],
+                "retrieval_scores": [],
+                "retrieved_count": 0,
+                "relevant_count": 0,
+                "relevance_threshold": (
+                    self.relevance_threshold
+                ),
+                "relevance_gate": {
+                    "input_count": 0,
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "threshold": (
+                        self.relevance_threshold
+                    ),
+                    "applied": False,
+                    "score_type": "not_retrieved",
+                },
+                "question_understanding": (
+                    understanding_metadata
+                ),
+                "query_rewrite": {
+                    "enabled": bool(
+                        self.enable_query_rewriting
+                    ),
+                    "rewritten": False,
+                    "original_query": question,
+                    "search_query": question,
+                    "reason": (
+                        "question_not_understandable"
+                    ),
+                },
+            }
+
+        # ========================================================
         # QUERY REWRITING
         # ========================================================
 
@@ -887,6 +1134,9 @@ class RAGPipeline:
             "relevant_count": len(
                 relevant_documents
             ),
+            "question_understanding": (
+                understanding_metadata
+            ),
         }
 
     # ============================================================
@@ -971,6 +1221,7 @@ class RAGPipeline:
             "query_rewriting": (
                 self.enable_query_rewriting
             ),
+            "question_understanding": True,
 
             "retriever_initialized": (
                 self.retriever is not None
