@@ -19,7 +19,6 @@ Le loader :
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 from pathlib import Path
 from typing import List
@@ -28,15 +27,9 @@ try:
     from docx import Document as DocxDocument
 except ImportError:
     DocxDocument = None
-    logging.warning(
-        "python-docx non installé. Les fichiers .docx ne seront pas chargés."
-    )
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
-
-
-logger = logging.getLogger(__name__)
 
 
 class DocumentLoader:
@@ -108,11 +101,6 @@ class DocumentLoader:
                     # Ignore les documents trop courts
                     if len(document.page_content.strip()) < self.min_chars:
 
-                        logger.warning(
-                            "Document ignoré car trop court : %s",
-                            path,
-                        )
-
                         continue
 
                     # Hash du contenu nettoyé
@@ -124,11 +112,6 @@ class DocumentLoader:
                     if content_hash in seen_content_hashes:
 
                         duplicate_documents += 1
-
-                        logger.warning(
-                            "Doublon ignoré : %s",
-                            path,
-                        )
 
                         continue
 
@@ -155,12 +138,6 @@ class DocumentLoader:
 
                 failed_files += 1
 
-                logger.exception(
-                    "Erreur pendant le chargement de %s : %s",
-                    path,
-                    exc,
-                )
-
         print()
         print(f"Documents chargés : {len(documents)}")
         print(f"Doublons ignorés   : {duplicate_documents}")
@@ -174,6 +151,10 @@ class DocumentLoader:
             )
 
         return documents
+
+    def load_documents(self) -> List[Document]:
+        """Alias de compatibilité vers :meth:`load`."""
+        return self.load()
 
     def _validate_directory(self) -> None:
         """
@@ -221,11 +202,6 @@ class DocumentLoader:
         if extension == ".docx":
 
             if DocxDocument is None:
-
-                logger.warning(
-                    "python-docx non disponible, skipping %s",
-                    path,
-                )
 
                 return []
 
@@ -356,6 +332,8 @@ class DocumentLoader:
 
         metadata = {
             "source": str(path),
+            "file_path": str(path),
+            "file": str(path),
             "filename": path.name,
             "extension": path.suffix.lower(),
             "relative_path": relative_path,

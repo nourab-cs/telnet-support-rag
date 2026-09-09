@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,9 +16,6 @@ from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
 )
 from langchain_experimental.text_splitter import SemanticChunker
-
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -249,10 +245,6 @@ Document à analyser :
 
         if content_hash in self._analysis_cache:
 
-            logger.info(
-                "Paramètres récupérés depuis le cache."
-            )
-
             return self._analysis_cache[content_hash]
 
         # ----------------------------------------------------
@@ -280,19 +272,10 @@ Document à analyser :
                     content_hash
                 ] = params
 
-                logger.info(
-                    "Agent IA : stratégie choisie = %s",
-                    params["strategy"],
-                )
-
                 return params
 
             except Exception as e:
-
-                logger.warning(
-                    "Erreur Agent IA : %s",
-                    e,
-                )
+                pass
 
         # ----------------------------------------------------
         # FALLBACK HEURISTIQUE
@@ -533,12 +516,12 @@ Document à analyser :
             # Nombre de lignes
             "line_count": len(lines),
 
-            # Nombre de lignes non vides
+            # Nombre de blocs séparés par une ligne vide.
             "paragraph_count": len(
                 [
-                    line
-                    for line in lines
-                    if line.strip()
+                    block
+                    for block in re.split(r"\n\s*\n", content.strip())
+                    if block.strip()
                 ]
             ),
 
@@ -588,37 +571,6 @@ Document à analyser :
         )
 
         strategy = params["strategy"]
-
-        logger.info(
-            "========================================"
-        )
-
-        logger.info(
-            "Document : %s",
-            document.metadata.get(
-                "source",
-                "inconnu",
-            ),
-        )
-
-        logger.info(
-            "Stratégie choisie par l'agent : %s",
-            strategy,
-        )
-
-        logger.info(
-            "Taille cible : %s",
-            params["target_chunk_size"],
-        )
-
-        logger.info(
-            "Raison : %s",
-            params["reason"],
-        )
-
-        logger.info(
-            "========================================"
-        )
 
         # ----------------------------------------------------
         # Sélection du splitter
@@ -739,12 +691,6 @@ Document à analyser :
 
             else:
 
-                logger.debug(
-                    "Section trop grande (%d), "
-                    "subdivision nécessaire.",
-                    len(chunk.page_content),
-                )
-
                 sub_chunks = (
                     self._semantic_or_recursive(
                         chunk,
@@ -773,11 +719,6 @@ Document à analyser :
 
         if self.embeddings is None:
 
-            logger.warning(
-                "Embeddings absents. "
-                "Fallback vers RecursiveCharacterTextSplitter."
-            )
-
             return self._recursive_chunking(
                 document,
                 params,
@@ -801,11 +742,6 @@ Document à analyser :
             return chunks
 
         except Exception as e:
-
-            logger.warning(
-                "Erreur SemanticChunker : %s",
-                e,
-            )
 
             return self._recursive_chunking(
                 document,
@@ -913,29 +849,26 @@ Document à analyser :
 
             content = chunk.page_content.strip()
 
-            if (
-                len(content)
-                < params["min_chunk_size"]
-            ):
-
-                # Fusionner avec le précédent
+            if len(content) < params["min_chunk_size"]:
+                # Fusionner seulement si cela reste dans la limite maximale.
                 if filtered:
-
                     previous = filtered[-1]
-
-                    previous.page_content = (
+                    merged = (
                         previous.page_content.rstrip()
                         + "\n\n"
                         + content
                     )
-
+                    if len(merged) <= params["max_chunk_size"]:
+                        previous.page_content = merged
+                    else:
+                        filtered.append(
+                            Document(
+                                page_content=content,
+                                metadata=dict(chunk.metadata),
+                            )
+                        )
                 else:
-
-                    logger.debug(
-                        "Petit chunk ignoré : %d caractères",
-                        len(content),
-                    )
-
+                    pass
                 continue
 
             filtered.append(
@@ -962,6 +895,10 @@ Document à analyser :
                     "source": source,
 
                     "chunk_index": index,
+
+                    "chunk_id": (
+                        f"{document.metadata.get('document_id', source)}:chunk:{index}"
+                    ),
 
                     "total_chunks": total_chunks,
 
@@ -1020,10 +957,6 @@ Document à analyser :
 
         if cache_file.exists():
 
-            logger.info(
-                "Chargement des chunks depuis le cache."
-            )
-
             try:
 
                 chunks = (
@@ -1039,11 +972,6 @@ Document à analyser :
                 return chunks
 
             except Exception as e:
-
-                logger.warning(
-                    "Cache invalide : %s",
-                    e,
-                )
 
                 cache_file.unlink(
                     missing_ok=True
@@ -1118,34 +1046,6 @@ Document à analyser :
             # SemanticChunker ne fonctionne
             # pas avec un overlap fixe.
             avg_overlap=0.0,
-        )
-
-        logger.info(
-            "========== CHUNKING METRICS =========="
-        )
-
-        logger.info(
-            "Nombre de chunks : %d",
-            self.metrics.total_chunks,
-        )
-
-        logger.info(
-            "Taille moyenne : %.0f",
-            self.metrics.avg_chunk_size,
-        )
-
-        logger.info(
-            "Taille min : %d",
-            self.metrics.min_chunk_size,
-        )
-
-        logger.info(
-            "Taille max : %d",
-            self.metrics.max_chunk_size,
-        )
-
-        logger.info(
-            "======================================="
         )
 
     # ========================================================
@@ -1243,11 +1143,7 @@ Document à analyser :
                 )
 
         except Exception as e:
-
-            logger.warning(
-                "Impossible de sauvegarder le cache : %s",
-                e,
-            )
+            pass
 
     # ========================================================
     # LOAD CACHE

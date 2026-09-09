@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import List, Optional
 
@@ -9,9 +8,6 @@ from langchain_ollama import ChatOllama
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-
-
-logger = logging.getLogger(__name__)
 
 
 class Generator:
@@ -52,22 +48,18 @@ class Generator:
         model_name: str = "mistral",
         temperature: float = 0.0,
         num_predict: int = 512,
+        max_response_chars: int = 4000,
     ) -> None:
 
         self.model_name = model_name
+        self.max_response_chars = max_response_chars
+        if max_response_chars <= 0:
+            raise ValueError("max_response_chars doit être > 0.")
 
         self.llm = ChatOllama(
             model=model_name,
             temperature=temperature,
             num_predict=num_predict,
-        )
-
-        logger.info(
-            "Generator initialisé | model=%s | "
-            "temperature=%.2f | num_predict=%d",
-            model_name,
-            temperature,
-            num_predict,
         )
 
     # ============================================================
@@ -167,10 +159,9 @@ class Generator:
         """
 
         suspicious_patterns = [
-            r"Let\s+\w+\s*=",
-            r"Suppose\s+",
-            r"Question:\s*Let",
-            r"What\s+is\s+the\s+\d+\s*\+\s*\d+",
+            r"^\s*(?:system|developer)\s*:",
+            r"^\s*ignore\s+(?:all|previous|prior)\s+instructions",
+            r"<\/?(?:system|developer|tool)>"
         ]
 
         for pattern in suspicious_patterns:
@@ -180,11 +171,6 @@ class Generator:
                 text,
                 re.IGNORECASE,
             ):
-
-                logger.warning(
-                    "Contenu suspect détecté | pattern=%s",
-                    pattern,
-                )
 
                 return True
 
@@ -201,13 +187,6 @@ class Generator:
 
         if len(text) > max_length:
 
-            logger.warning(
-                "Réponse trop longue | "
-                "length=%d | max=%d",
-                len(text),
-                max_length,
-            )
-
             return False
 
         return True
@@ -222,19 +201,11 @@ class Generator:
 
         if not text or not text.strip():
 
-            logger.warning(
-                "Réponse vide."
-            )
-
             return False
 
         if text.count(
             "Je ne trouve pas cette information"
         ) > 1:
-
-            logger.warning(
-                "Message fallback répété."
-            )
 
             return False
 
@@ -252,11 +223,6 @@ class Generator:
             )
 
             if ratio < 0.30:
-
-                logger.warning(
-                    "Répétitions excessives | ratio=%.2f",
-                    ratio,
-                )
 
                 return False
 
@@ -280,22 +246,14 @@ class Generator:
             )
         )
 
-        suspicious = (
-            self._contains_suspicious_content(
-                result
-            )
+        suspicious = self._contains_suspicious_content(result)
+        length_ok = self._validate_response_length(
+            result, max_length=self.max_response_chars
         )
 
-        validation_passed = (
-            quality_ok
-            and not suspicious
-        )
+        validation_passed = quality_ok and not suspicious and length_ok
 
         if not validation_passed:
-
-            logger.warning(
-                "Validation de la réponse échouée."
-            )
 
             result = self.FALLBACK_MESSAGE
 
@@ -386,6 +344,7 @@ RÈGLES :
         question: str,
         documents: List[Document],
         history: Optional[str] = None,
+        standalone_question: Optional[str] = None,
     ) -> dict:
         """
         Génère une réponse à partir de documents
@@ -437,7 +396,7 @@ RÈGLES :
 
         input_data = {
             "context": context,
-            "question": question,
+            "question": (standalone_question or question).strip(),
             "history": (
                 history
                 if has_history
@@ -455,13 +414,6 @@ RÈGLES :
             | StrOutputParser()
         )
 
-        logger.info(
-            "Génération LLM | "
-            "documents=%d | history=%s",
-            len(documents),
-            has_history,
-        )
-
         # --------------------------------------------------------
         # INVOKE
         # --------------------------------------------------------
@@ -473,10 +425,6 @@ RÈGLES :
             )
 
         except Exception as exc:
-
-            logger.exception(
-                "Erreur pendant la génération LLM."
-            )
 
             raise RuntimeError(
                 "Erreur pendant la génération "

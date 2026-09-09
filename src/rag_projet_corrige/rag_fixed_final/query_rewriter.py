@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from langchain_ollama import ChatOllama
-
-
-logger = logging.getLogger(__name__)
 
 
 class QueryRewriter:
@@ -49,14 +45,6 @@ class QueryRewriter:
             temperature=temperature,
         )
 
-        logger.info(
-            "QueryRewriter initialisé | model=%s | temperature=%.2f | "
-            "max_history_chars=%d",
-            model_name,
-            temperature,
-            max_history_chars,
-        )
-
     def rewrite(
         self,
         question: str,
@@ -75,10 +63,6 @@ class QueryRewriter:
             return ""
 
         if not history or not history.strip():
-            logger.debug(
-                "QueryRewriter | aucun historique | query=%r",
-                question,
-            )
             return question
 
         history = history[-self.max_history_chars :]
@@ -129,26 +113,13 @@ Requête autonome :
             rewritten = self._extract_content(response)
 
             if not rewritten:
-                logger.warning(
-                    "QueryRewriter | réponse vide | fallback question originale"
-                )
                 return question
 
             rewritten = self._clean_output(rewritten)
 
-            logger.info(
-                "Query rewriting | original=%r | rewritten=%r",
-                question,
-                rewritten,
-            )
-
             return rewritten
 
         except Exception as exc:
-            logger.exception(
-                "Erreur QueryRewriter | fallback sur question originale | %s",
-                exc,
-            )
             return question
 
     @staticmethod

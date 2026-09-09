@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-
-logger = logging.getLogger(__name__)
 
 
 class ConversationHistory:
@@ -39,14 +35,6 @@ class ConversationHistory:
 
         self.session_id = datetime.now().strftime(
             "%Y%m%d_%H%M%S_%f"
-        )
-
-        logger.info(
-            "ConversationHistory initialisée | session=%s | "
-            "max_history=%d | max_context_chars=%d",
-            self.session_id,
-            self.max_history,
-            self.max_context_chars,
         )
 
     # ============================================================
@@ -159,6 +147,24 @@ class ConversationHistory:
     def format_history(self) -> str:
         return self.get_formatted_history()
 
+    @staticmethod
+    def _truncate_by_message_boundary(
+        lines: List[str],
+        max_chars: int,
+    ) -> str:
+        """Conserve des messages complets en privilégiant les plus récents."""
+        if max_chars <= 0:
+            return ""
+        selected: List[str] = []
+        size = 0
+        for line in reversed(lines):
+            extra = len(line) + (1 if selected else 0)
+            if size + extra > max_chars:
+                break
+            selected.append(line)
+            size += extra
+        return "\n".join(reversed(selected))
+
     # ============================================================
     # CONTEXTE POUR QUERY REWRITER
     # ============================================================
@@ -196,12 +202,7 @@ class ConversationHistory:
                 f"{label}: {message['content']}"
             )
 
-        context = "\n".join(lines)
-
-        if len(context) > max_chars:
-            context = context[-max_chars:]
-
-        return context
+        return self._truncate_by_message_boundary(lines, max_chars)
 
     # ============================================================
     # CONTEXTE POUR GENERATOR
@@ -215,12 +216,13 @@ class ConversationHistory:
         if max_chars is None:
             max_chars = self.max_context_chars
 
-        context = self.get_formatted_history()
-
-        if len(context) <= max_chars:
-            return context
-
-        return context[-max_chars:]
+        messages = self.get_history()
+        lines = []
+        for message in messages:
+            role = message["role"]
+            label = "Utilisateur" if role == "user" else "Assistant" if role == "assistant" else "Système"
+            lines.append(f"{label}: {message['content']}")
+        return self._truncate_by_message_boundary(lines, max_chars)
 
     # ============================================================
     # QUESTIONS RECENTES
@@ -304,11 +306,6 @@ class ConversationHistory:
     def clear(self) -> None:
         self.messages.clear()
 
-        logger.info(
-            "Historique effacé | session=%s",
-            self.session_id,
-        )
-
     # ============================================================
     # PERSISTENCE
     # ============================================================
@@ -339,11 +336,6 @@ class ConversationHistory:
                 ensure_ascii=False,
                 indent=2,
             )
-
-        logger.info(
-            "Historique sauvegardé | path=%s",
-            filepath,
-        )
 
     @classmethod
     def load(

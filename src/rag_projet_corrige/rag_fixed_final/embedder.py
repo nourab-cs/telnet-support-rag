@@ -1,9 +1,6 @@
 from langchain_huggingface import HuggingFaceEmbeddings
-import logging
 from pathlib import Path
 import os
-
-logger = logging.getLogger(__name__)
 
 
 class Embedder:
@@ -24,16 +21,12 @@ class Embedder:
         self.device = device
         self.normalize_embeddings = normalize_embeddings
         self.cache_folder = Path(cache_folder)
-        self.cache_folder.mkdir(exist_ok=True)
+        self.cache_folder.mkdir(parents=True, exist_ok=True)
 
         # Configuration HF pour le cache (localisée à cette instance)
         self._setup_hf_cache()
 
         try:
-            logger.info(f"Chargement du modèle d'embeddings: {model_name}")
-            logger.info(f"Cache: {self.cache_folder}")
-            logger.info(f"Device: {device}")
-
             self.embedding_model = HuggingFaceEmbeddings(
                 model_name=self.model_name,
                 model_kwargs={
@@ -47,10 +40,7 @@ class Embedder:
                 cache_folder=str(self.cache_folder),
             )
 
-            logger.info("Modèle d'embeddings chargé avec succès")
-
         except Exception as e:
-            logger.error(f"Erreur lors du chargement du modèle d'embeddings: {e}")
             raise
 
     def _setup_hf_cache(self):
@@ -65,7 +55,6 @@ class Embedder:
             os.environ['TRANSFORMERS_CACHE'] = str(self.cache_folder / 'transformers')
             os.environ['HF_DATASETS_CACHE'] = str(self.cache_folder / 'datasets')
         except Exception as e:
-            logger.warning(f"Erreur lors de la configuration du cache HF: {e}")
             # Restaurer les valeurs originales en cas d'erreur
             if original_hf_home:
                 os.environ['HF_HOME'] = original_hf_home
@@ -96,7 +85,6 @@ class Embedder:
         try:
             return self.embedding_model.embed_documents(texts)
         except Exception as e:
-            logger.error(f"Erreur lors de l'embedding des documents: {e}")
             raise
     
     def embed_query(self, text: str) -> list[float]:
@@ -112,5 +100,4 @@ class Embedder:
         try:
             return self.embedding_model.embed_query(text)
         except Exception as e:
-            logger.error(f"Erreur lors de l'embedding de la requête: {e}")
             raise

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 
@@ -12,20 +11,13 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from rag.pipeline import RAGPipeline  # noqa: E402
+from rag_projet_corrige.rag_fixed_final.pipeline import RAGPipeline  # noqa: E402
 
 
 DATA_DIR = PROJECT_ROOT / "data"
 DB_DIR = PROJECT_ROOT / "chroma_db"
 
 COLLECTION_NAME = "telnet_support"
-
-
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def print_result(result: dict) -> None:
@@ -68,23 +60,10 @@ def print_result(result: dict) -> None:
             f"\nRequête de recherche : {search_query}"
         )
 
-    trace = result.get("trace", {})
-
-    if trace:
-
-        latency = trace.get("latency", {})
-
-        print(
-            "\nLatence : "
-            f"{latency.get('total', 0):.3f}s"
-        )
-
     print("-" * 70)
 
 
 def main() -> None:
-
-    configure_logging()
 
     print(
         "Initialisation du système RAG TELNET Support Bot"
@@ -98,12 +77,14 @@ def main() -> None:
         embedding_model="BAAI/bge-m3",
         llm_model="mistral",
 
-        retrieval_type="mmr",
+        retrieval_type="hybrid",
         retrieval_k=8,
         retrieval_fetch_k=20,
         retrieval_lambda=0.6,
+        hybrid_k=10,
 
         relevance_threshold=0.40,
+        hybrid_relevance_threshold=0.01,
 
         max_context_documents=6,
 
@@ -176,12 +157,6 @@ def main() -> None:
             print_result(result)
 
         except Exception as exc:
-
-            logging.getLogger(
-                __name__
-            ).exception(
-                "Erreur pendant le traitement de la question"
-            )
 
             print(
                 f"Erreur : {exc}"

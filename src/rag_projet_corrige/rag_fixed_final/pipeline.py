@@ -1,7 +1,5 @@
-
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,9 +13,6 @@ from .retriever import Retriever
 from .generator import Generator
 from .conversation_history import ConversationHistory
 from .query_rewriter import QueryRewriter
-
-
-logger = logging.getLogger(__name__)
 
 
 class RAGPipeline:
@@ -34,7 +29,7 @@ class RAGPipeline:
             ↓
         Search Query
             ↓
-        Retriever
+        Retriever (hybrid avec RRF pur)
             ↓
         Relevance Gate
             ↓
@@ -62,8 +57,11 @@ class RAGPipeline:
         retrieval_k: int = 8,
         retrieval_fetch_k: int = 20,
         retrieval_lambda: float = 0.6,
+        hybrid_k: int = 10,
 
-        relevance_threshold: float = 0.40,
+        relevance_threshold: Optional[float] = 0.40,
+        bm25_relevance_threshold: Optional[float] = None,
+        hybrid_relevance_threshold: Optional[float] = None,
 
         max_context_documents: int = 6,
 
@@ -89,20 +87,26 @@ class RAGPipeline:
         self.retrieval_k = retrieval_k
         self.retrieval_fetch_k = retrieval_fetch_k
         self.retrieval_lambda = retrieval_lambda
+        self.hybrid_k = hybrid_k
 
-        self.relevance_threshold = (
-            relevance_threshold
-        )
+        self.relevance_threshold = relevance_threshold
+        self.bm25_relevance_threshold = bm25_relevance_threshold
+        self.hybrid_relevance_threshold = hybrid_relevance_threshold
+        self.chunking_version = "chunking_agent_v1"
+        self.index_documents: List[Document] = []
 
-        self.max_context_documents = (
-            max_context_documents
-        )
+        if relevance_threshold is not None and relevance_threshold < 0:
+            raise ValueError("relevance_threshold doit être >= 0 ou None.")
+        if bm25_relevance_threshold is not None and bm25_relevance_threshold < 0:
+            raise ValueError("bm25_relevance_threshold doit être >= 0 ou None.")
+        if hybrid_relevance_threshold is not None and hybrid_relevance_threshold < 0:
+            raise ValueError("hybrid_relevance_threshold doit être >= 0 ou None.")
+
+        self.max_context_documents = max_context_documents
 
         self.use_history = use_history
         self.max_history = max_history
-        self.max_history_chars = (
-            max_history_chars
-        )
+        self.max_history_chars = max_history_chars
 
         self.enable_query_rewriting = (
             enable_query_rewriting
@@ -124,17 +128,8 @@ class RAGPipeline:
             model_name=embedding_model
         )
 
-        # IMPORTANT :
-        # Embedder expose get_embeddings()
-        # et non .embeddings
-
         self.embeddings = (
             self.embedder.get_embeddings()
-        )
-
-        logger.info(
-            "Embeddings initialisés | model=%s",
-            embedding_model,
         )
 
         # ========================================================
@@ -144,7 +139,7 @@ class RAGPipeline:
         self.chunker = ChunkingAgent(
             model_name=llm_model,
             embeddings=self.embeddings,
-            enable_llm_analysis=False,
+            enable_llm_analysis=True,
             target_chunk_size=900,
             min_chunk_size=300,
             max_chunk_size=1200,
@@ -194,22 +189,6 @@ class RAGPipeline:
                 max_history_chars=max_history_chars,
             )
 
-        logger.info(
-            "RAGPipeline initialisé | "
-            "collection=%s | retrieval=%s | "
-            "k=%d | fetch_k=%d | lambda=%.2f | "
-            "threshold=%.2f | history=%s | "
-            "query_rewriting=%s",
-            collection_name,
-            retrieval_type,
-            retrieval_k,
-            retrieval_fetch_k,
-            retrieval_lambda,
-            relevance_threshold,
-            use_history,
-            enable_query_rewriting,
-        )
-
     # ============================================================
     # INITIALISATION
     # ============================================================
@@ -226,7 +205,6 @@ class RAGPipeline:
         )
 
         if vectorstore is None:
-
             raise RuntimeError(
                 "La base vectorielle n'est pas chargée. "
                 "Appelez load_existing() ou build_index()."
@@ -236,14 +214,20 @@ class RAGPipeline:
         # RETRIEVER
         # ========================================================
 
+        retriever_documents = (
+            self.index_documents
+            if self.retrieval_type in ("bm25", "hybrid")
+            else None
+        )
+
         self.retriever = Retriever(
             vectordb=vectorstore,
+            documents=retriever_documents,
             search_type=self.retrieval_type,
             k=self.retrieval_k,
             fetch_k=self.retrieval_fetch_k,
             lambda_mult=self.retrieval_lambda,
-            score_threshold=self.relevance_threshold,
-            enable_tracing=True,
+            hybrid_k=self.hybrid_k,
         )
 
         # ========================================================
@@ -256,43 +240,22 @@ class RAGPipeline:
             num_predict=512,
         )
 
-        logger.info(
-            "Composants query initialisés | "
-            "retriever=%s | generator=%s",
-            type(self.retriever).__name__,
-            type(self.generator).__name__,
-        )
-
     # ============================================================
     # BUILD INDEX
     # ============================================================
 
     def build_index(self) -> Dict[str, Any]:
 
-        start = time.perf_counter()
-
-        logger.info(
-            "Début construction index."
-        )
-
         # --------------------------------------------------------
         # LOAD DOCUMENTS
         # --------------------------------------------------------
 
-        documents = (
-            self.loader.load_documents()
-        )
+        documents = self.loader.load()
 
         if not documents:
-
             raise ValueError(
                 "Aucun document trouvé."
             )
-
-        logger.info(
-            "Documents chargés | count=%d",
-            len(documents),
-        )
 
         # --------------------------------------------------------
         # CHUNKING
@@ -305,15 +268,9 @@ class RAGPipeline:
         )
 
         if not chunks:
-
             raise ValueError(
                 "Aucun chunk généré."
             )
-
-        logger.info(
-            "Chunks générés | count=%d",
-            len(chunks),
-        )
 
         # --------------------------------------------------------
         # CHROMA
@@ -324,8 +281,9 @@ class RAGPipeline:
             embeddings=self.embeddings,
             documents=documents,
             embedding_model=self.embedding_model,
-            chunking_version="chunking_agent_v1",
+            chunking_version=self.chunking_version,
         )
+        self.index_documents = list(chunks)
 
         # --------------------------------------------------------
         # QUERY COMPONENTS
@@ -333,44 +291,41 @@ class RAGPipeline:
 
         self._initialize_query_components()
 
-        elapsed = (
-            time.perf_counter()
-            - start
-        )
-
-        logger.info(
-            "Index construit | "
-            "documents=%d | chunks=%d | latency=%.3fs",
-            len(documents),
-            len(chunks),
-            elapsed,
-        )
-
         return {
             "documents": len(documents),
             "chunks": len(chunks),
-            "latency": elapsed,
         }
 
     # ============================================================
     # LOAD EXISTING
     # ============================================================
 
-    def load_existing(self) -> None:
+    def load_existing(self, strict_compatibility: bool = True) -> None:
+        """Charge un index persistant et reconstruit les données auxiliaires nécessaires."""
 
-        logger.info(
-            "Chargement de la base vectorielle."
-        )
+        if strict_compatibility and not self.vector_store.is_compatible(
+            embedding_model=self.embedding_model,
+            chunking_version=self.chunking_version,
+        ):
+            manifest = self.vector_store.get_manifest()
+            if manifest:
+                raise ValueError(
+                    "Index Chroma incompatible avec la configuration actuelle : "
+                    f"embedding={manifest.get('embedding_model')!r}, "
+                    f"chunking={manifest.get('chunking_version')!r}."
+                )
+            if strict_compatibility:
+                raise ValueError(
+                    "Manifest Chroma absent. Utilisez strict_compatibility=False "
+                    "ou reconstruisez l'index."
+                )
 
-        self.vector_store.load(
-            embeddings=self.embeddings
-        )
+        self.vector_store.load(embeddings=self.embeddings)
+        self.index_documents = self.vector_store.get_documents()
+        if not self.index_documents:
+            raise ValueError("Aucun chunk récupérable depuis l'index Chroma.")
 
         self._initialize_query_components()
-
-        logger.info(
-            "Base vectorielle chargée avec succès."
-        )
 
     # ============================================================
     # QUERY REWRITING
@@ -484,10 +439,6 @@ class RAGPipeline:
                 - start
             )
 
-            logger.exception(
-                "Erreur QueryRewriter."
-            )
-
             return (
                 original_question,
                 {
@@ -527,16 +478,6 @@ class RAGPipeline:
             "history_used": True,
             "rewriter_latency": elapsed,
         }
-
-        logger.info(
-            "Query rewriting terminé | "
-            "rewritten=%s | latency=%.3fs | "
-            "original=%r | search=%r",
-            was_rewritten,
-            elapsed,
-            original_question,
-            rewritten_query,
-        )
 
         return (
             rewritten_query,
@@ -605,15 +546,30 @@ class RAGPipeline:
         Dict[str, Any],
     ]:
 
-        if not results:
+        threshold = (
+            self.bm25_relevance_threshold
+            if self.retrieval_type == "bm25"
+            else self.hybrid_relevance_threshold
+            if self.retrieval_type == "hybrid"
+            else self.relevance_threshold
+        )
 
+        if not results:
             return (
                 [],
                 {
                     "input_count": 0,
                     "accepted_count": 0,
                     "rejected_count": 0,
-                    "threshold": self.relevance_threshold,
+                    "threshold": threshold,
+                    "applied": threshold is not None,
+                    "score_type": (
+                        "bm25"
+                        if self.retrieval_type == "bm25"
+                        else "hybrid"
+                        if self.retrieval_type == "hybrid"
+                        else "relevance"
+                    ),
                 },
             )
 
@@ -621,10 +577,9 @@ class RAGPipeline:
         rejected = []
 
         for document, score in results:
-
             score = float(score)
 
-            if score >= self.relevance_threshold:
+            if threshold is None or score >= threshold:
 
                 relevant.append(
                     (
@@ -646,23 +601,41 @@ class RAGPipeline:
             "input_count": len(results),
             "accepted_count": len(relevant),
             "rejected_count": len(rejected),
-            "threshold": self.relevance_threshold,
+            "threshold": threshold,
+            "applied": threshold is not None,
+            "score_type": (
+                "bm25"
+                if self.retrieval_type == "bm25"
+                else "hybrid"
+                if self.retrieval_type == "hybrid"
+                else "relevance"
+            ),
         }
-
-        logger.info(
-            "Relevance Gate | "
-            "input=%d | accepted=%d | "
-            "rejected=%d | threshold=%.3f",
-            len(results),
-            len(relevant),
-            len(rejected),
-            self.relevance_threshold,
-        )
 
         return (
             relevant,
             metadata,
         )
+
+    def _score_is_accepted(self, score: float) -> bool:
+        """
+        Check if a score meets the relevance threshold.
+
+        Args:
+            score: The relevance score to check
+
+        Returns:
+            True if the score is accepted, False otherwise
+        """
+        threshold = (
+            self.bm25_relevance_threshold
+            if self.retrieval_type == "bm25"
+            else self.hybrid_relevance_threshold
+            if self.retrieval_type == "hybrid"
+            else self.relevance_threshold
+        )
+
+        return threshold is None or score >= threshold
 
     # ============================================================
     # ASK
@@ -673,10 +646,6 @@ class RAGPipeline:
         question: str,
     ) -> Dict[str, Any]:
 
-        start_total = (
-            time.perf_counter()
-        )
-
         question = (
             question or ""
         ).strip()
@@ -686,15 +655,6 @@ class RAGPipeline:
             raise ValueError(
                 "La question ne peut pas être vide."
             )
-
-        logger.info(
-            "=" * 70
-        )
-
-        logger.info(
-            "Nouvelle question | question=%r",
-            question,
-        )
 
         # ========================================================
         # INITIALISATION
@@ -729,7 +689,7 @@ class RAGPipeline:
 
         (
             search_query,
-            rewrite_trace,
+            _rewrite_metadata,
         ) = self._rewrite_query(
             question
         )
@@ -738,29 +698,11 @@ class RAGPipeline:
         # RETRIEVAL
         # ========================================================
 
-        retrieval_start = (
-            time.perf_counter()
-        )
-
         retrieval_results = (
             self.retriever.retrieve_with_scores(
                 query=search_query,
                 k=self.retrieval_k,
             )
-        )
-
-        retrieval_latency = (
-            time.perf_counter()
-            - retrieval_start
-        )
-
-        logger.info(
-            "Retrieval terminé | "
-            "query=%r | results=%d | "
-            "latency=%.3fs",
-            search_query,
-            len(retrieval_results),
-            retrieval_latency,
         )
 
         # ========================================================
@@ -769,7 +711,7 @@ class RAGPipeline:
 
         (
             relevant_results,
-            gate_trace,
+            _gate_metadata,
         ) = self._apply_relevance_gate(
             retrieval_results
         )
@@ -779,53 +721,31 @@ class RAGPipeline:
         # ========================================================
 
         seen = set()
-
         documents_with_scores = []
 
         for document, score in relevant_results:
-
-            content = (
-                document.page_content or ""
-            ).strip()
-
-            metadata = (
-                document.metadata or {}
-            )
-
+            content = (document.page_content or "").strip()
+            metadata = document.metadata or {}
             source = (
                 metadata.get("source")
-                or metadata.get("file_path")
+                or metadata.get("relative_path")
                 or metadata.get("filename")
                 or ""
             )
-
-            chunk_id = metadata.get(
-                "chunk_id"
-            )
-
-            key = (
-                source,
-                chunk_id,
-                content,
-            )
-
+            chunk_id = metadata.get("chunk_id")
+            key = (source, chunk_id, content)
             if key in seen:
                 continue
-
             seen.add(key)
-
-            # Ajouter le score dans les metadata
-            # pour que Generator puisse l'afficher.
-            document.metadata[
-                "retrieval_score"
-            ] = float(score)
-
-            documents_with_scores.append(
-                (
-                    document,
-                    float(score),
-                )
+            document.metadata["retrieval_score"] = float(score)
+            document.metadata["retrieval_score_type"] = (
+                "bm25"
+                if self.retrieval_type == "bm25"
+                else "hybrid"
+                if self.retrieval_type == "hybrid"
+                else "vector_relevance"
             )
+            documents_with_scores.append((document, float(score)))
 
         # ========================================================
         # CONTEXT LIMIT
@@ -849,72 +769,9 @@ class RAGPipeline:
             in documents_with_scores
         ]
 
-        logger.info(
-            "Contexte final | documents=%d",
-            len(relevant_documents),
-        )
-
-        # ========================================================
-        # TRACE DOCUMENTS
-        # ========================================================
-
-        documents_trace = []
-
-        for rank, (
-            document,
-            score,
-        ) in enumerate(
-            retrieval_results,
-            start=1,
-        ):
-
-            metadata = (
-                document.metadata or {}
-            )
-
-            documents_trace.append(
-                {
-                    "rank": rank,
-                    "score": float(score),
-                    "source": metadata.get(
-                        "source"
-                    ),
-                    "file": metadata.get(
-                        "file"
-                    ),
-                    "filename": metadata.get(
-                        "filename"
-                    ),
-                    "page": metadata.get(
-                        "page"
-                    ),
-                    "chunk_id": metadata.get(
-                        "chunk_id"
-                    ),
-                    "accepted": (
-                        float(score)
-                        >= self.relevance_threshold
-                    ),
-                    "preview": (
-                        (
-                            document.page_content
-                            or ""
-                        )[:300]
-                        .replace(
-                            "\n",
-                            " ",
-                        )
-                    ),
-                }
-            )
-
         # ========================================================
         # GENERATION
         # ========================================================
-
-        generation_start = (
-            time.perf_counter()
-        )
 
         if not relevant_documents:
 
@@ -925,16 +782,12 @@ class RAGPipeline:
                 "à cette question."
             )
 
-            generation_trace = {
-                "executed": False,
-                "reason": "no_relevant_documents",
-            }
-
         else:
 
             generator_result = (
                 self.generator.generate(
                     question=question,
+                    standalone_question=search_query,
                     documents=relevant_documents,
                     history=history_text,
                 )
@@ -953,40 +806,15 @@ class RAGPipeline:
                     ),
                 )
 
-                generation_trace = {
-                    "executed": True,
-                    "validation_passed": (
-                        generator_result.get(
-                            "validation_passed",
-                            True,
-                        )
-                    ),
-                }
-
             else:
 
                 answer = str(
                     generator_result
                 )
 
-                generation_trace = {
-                    "executed": True,
-                    "validation_passed": True,
-                }
-
-        generation_latency = (
-            time.perf_counter()
-            - generation_start
-        )
-
         answer = (
             answer or ""
         ).strip()
-
-        logger.info(
-            "Generation terminée | latency=%.3fs",
-            generation_latency,
-        )
 
         # ========================================================
         # SAVE HISTORY
@@ -1005,9 +833,11 @@ class RAGPipeline:
                     "source": metadata.get(
                         "source"
                     ),
+
                     "page": metadata.get(
                         "page"
                     ),
+
                     "chunk_id": metadata.get(
                         "chunk_id"
                     ),
@@ -1024,112 +854,6 @@ class RAGPipeline:
                 answer,
                 sources=source_metadata,
             )
-
-        # ========================================================
-        # TOTAL LATENCY
-        # ========================================================
-
-        total_latency = (
-            time.perf_counter()
-            - start_total
-        )
-
-        # ========================================================
-        # TRACE
-        # ========================================================
-
-        trace = {
-
-            "original_question": question,
-
-            "query_rewriting": rewrite_trace,
-
-            "retrieval": {
-
-                "configured_method": (
-                    self.retrieval_type
-                ),
-
-                "k": self.retrieval_k,
-
-                "fetch_k": (
-                    self.retrieval_fetch_k
-                ),
-
-                "lambda": (
-                    self.retrieval_lambda
-                ),
-
-                "query": search_query,
-
-                "latency": retrieval_latency,
-
-                "result_count": len(
-                    retrieval_results
-                ),
-            },
-
-            "relevance_gate": gate_trace,
-
-            "documents": documents_trace,
-
-            "context": {
-
-                "selected_count": len(
-                    relevant_documents
-                ),
-
-                "max_context_documents": (
-                    self.max_context_documents
-                ),
-
-                "scores": relevant_scores,
-            },
-
-            "generation": {
-
-                "model": self.llm_model,
-
-                "latency": generation_latency,
-
-                **generation_trace,
-            },
-
-            "history": {
-
-                "enabled": self.use_history,
-
-                "messages": len(
-                    self.history
-                ),
-            },
-
-            "latency": {
-
-                "total": total_latency,
-
-                "query_rewriting": (
-                    rewrite_trace.get(
-                        "rewriter_latency",
-                        0.0,
-                    )
-                ),
-
-                "retrieval": retrieval_latency,
-
-                "generation": generation_latency,
-            },
-        }
-
-        logger.info(
-            "Question terminée | "
-            "total_latency=%.3fs",
-            total_latency,
-        )
-
-        logger.info(
-            "=" * 70
-        )
 
         # ========================================================
         # RESULT
@@ -1156,15 +880,6 @@ class RAGPipeline:
                 relevant_scores
             ),
 
-            "query_type": (
-                "rewritten"
-                if rewrite_trace.get(
-                    "rewritten",
-                    False,
-                )
-                else "standalone"
-            ),
-
             "retrieved_count": len(
                 retrieval_results
             ),
@@ -1172,8 +887,6 @@ class RAGPipeline:
             "relevant_count": len(
                 relevant_documents
             ),
-
-            "trace": trace,
         }
 
     # ============================================================
@@ -1239,9 +952,13 @@ class RAGPipeline:
                 self.retrieval_lambda
             ),
 
-            "relevance_threshold": (
-                self.relevance_threshold
-            ),
+            "relevance_threshold": self.relevance_threshold,
+
+            "bm25_relevance_threshold": self.bm25_relevance_threshold,
+
+            "hybrid_relevance_threshold": self.hybrid_relevance_threshold,
+
+            "chunking_version": self.chunking_version,
 
             "history_enabled": (
                 self.use_history
@@ -1263,4 +980,3 @@ class RAGPipeline:
                 self.generator is not None
             ),
         }
-
