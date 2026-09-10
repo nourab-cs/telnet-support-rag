@@ -1,20 +1,25 @@
+
 from __future__ import annotations
 
+import json
+import logging
 import time
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.documents import Document
 from langchain_ollama import ChatOllama
 
-from .document_loader import DocumentLoader
-from .embedder import Embedder
 from .chunking_agent import ChunkingAgent
 from .chroma_store import ChromaStore
-from .retriever import Retriever
-from .generator import Generator
 from .conversation_history import ConversationHistory
+from .document_loader import DocumentLoader
+from .embedder import Embedder
+from .generator import Generator
 from .query_rewriter import QueryRewriter
+from .retriever import Retriever
+
+
+logger = logging.getLogger(__name__)
 
 
 class RAGPipeline:
@@ -25,13 +30,13 @@ class RAGPipeline:
 
         Question
             ↓
-        ConversationHistory
+        Validation
             ↓
-        QueryRewriter
+        History Dependency
             ↓
-        Search Query
+        Query Rewriting
             ↓
-        Retriever (hybrid avec RRF pur)
+        Retrieval
             ↓
         Relevance Gate
             ↓
@@ -39,11 +44,11 @@ class RAGPipeline:
             ↓
         Context
             ↓
-        Generator / Mistral
+        Generator
             ↓
         Answer
             ↓
-        ConversationHistory
+        History
     """
 
     def __init__(
@@ -61,9 +66,10 @@ class RAGPipeline:
         retrieval_lambda: float = 0.6,
         hybrid_k: int = 10,
 
-        relevance_threshold: Optional[float] = None,
+        relevance_threshold: Optional[float] = 0.40,
         bm25_relevance_threshold: Optional[float] = None,
         hybrid_relevance_threshold: Optional[float] = None,
+        similarity_score_threshold: Optional[float] = 0.40,
 
         max_context_documents: int = 6,
 
@@ -73,6 +79,58 @@ class RAGPipeline:
 
         enable_query_rewriting: bool = True,
     ) -> None:
+
+        # ========================================================
+        # VALIDATION CONFIGURATION
+        # ========================================================
+
+        if retrieval_type not in Retriever.VALID_SEARCH_TYPES:
+            raise ValueError(
+                f"retrieval_type invalide : {retrieval_type}"
+            )
+
+        if int(retrieval_k) <= 0:
+            raise ValueError(
+                "retrieval_k doit être > 0."
+            )
+
+        if int(retrieval_fetch_k) <= 0:
+            raise ValueError(
+                "retrieval_fetch_k doit être > 0."
+            )
+
+        if not 0.0 <= float(retrieval_lambda) <= 1.0:
+            raise ValueError(
+                "retrieval_lambda doit être compris entre 0 et 1."
+            )
+
+        if int(hybrid_k) <= 0:
+            raise ValueError(
+                "hybrid_k doit être > 0."
+            )
+
+        if int(max_context_documents) <= 0:
+            raise ValueError(
+                "max_context_documents doit être > 0."
+            )
+
+        for name, value in {
+            "relevance_threshold": relevance_threshold,
+            "bm25_relevance_threshold": bm25_relevance_threshold,
+            "hybrid_relevance_threshold": hybrid_relevance_threshold,
+        }.items():
+
+            if value is not None and float(value) < 0:
+                raise ValueError(
+                    f"{name} doit être >= 0 ou None."
+                )
+
+        if similarity_score_threshold is not None:
+            if not 0.0 <= float(similarity_score_threshold) <= 1.0:
+                raise ValueError(
+                    "similarity_score_threshold doit être compris "
+                    "entre 0 et 1."
+                )
 
         # ========================================================
         # CONFIGURATION
@@ -86,33 +144,33 @@ class RAGPipeline:
         self.llm_model = llm_model
 
         self.retrieval_type = retrieval_type
-        self.retrieval_k = retrieval_k
-        self.retrieval_fetch_k = retrieval_fetch_k
-        self.retrieval_lambda = retrieval_lambda
-        self.hybrid_k = hybrid_k
+        self.retrieval_k = int(retrieval_k)
+        self.retrieval_fetch_k = int(retrieval_fetch_k)
+        self.retrieval_lambda = float(retrieval_lambda)
+        self.hybrid_k = int(hybrid_k)
 
         self.relevance_threshold = relevance_threshold
         self.bm25_relevance_threshold = bm25_relevance_threshold
         self.hybrid_relevance_threshold = hybrid_relevance_threshold
-        self.chunking_version = "chunking_agent_v1"
-        self.index_documents: List[Document] = []
+        self.similarity_score_threshold = similarity_score_threshold
 
-        if relevance_threshold is not None and relevance_threshold < 0:
-            raise ValueError("relevance_threshold doit être >= 0 ou None.")
-        if bm25_relevance_threshold is not None and bm25_relevance_threshold < 0:
-            raise ValueError("bm25_relevance_threshold doit être >= 0 ou None.")
-        if hybrid_relevance_threshold is not None and hybrid_relevance_threshold < 0:
-            raise ValueError("hybrid_relevance_threshold doit être >= 0 ou None.")
-
-        self.max_context_documents = max_context_documents
+        self.max_context_documents = int(
+            max_context_documents
+        )
 
         self.use_history = use_history
-        self.max_history = max_history
-        self.max_history_chars = max_history_chars
+        self.max_history = int(max_history)
+        self.max_history_chars = int(max_history_chars)
 
         self.enable_query_rewriting = (
             enable_query_rewriting
         )
+
+        self.chunking_version = "chunking_agent_v1"
+
+        self.index_documents: List[
+            Document
+        ] = []
 
         # ========================================================
         # DOCUMENT LOADER
@@ -141,14 +199,14 @@ class RAGPipeline:
         self.chunker = ChunkingAgent(
             model_name=llm_model,
             embeddings=self.embeddings,
-            enable_llm_analysis=True,
+            enable_llm_analysis=False,
             target_chunk_size=900,
             min_chunk_size=300,
             max_chunk_size=1200,
         )
 
         # ========================================================
-        # CHROMA STORE
+        # CHROMA
         # ========================================================
 
         self.vector_store = ChromaStore(
@@ -160,8 +218,13 @@ class RAGPipeline:
         # COMPONENTS
         # ========================================================
 
-        self.retriever: Optional[Retriever] = None
-        self.generator: Optional[Generator] = None
+        self.retriever: Optional[
+            Retriever
+        ] = None
+
+        self.generator: Optional[
+            Generator
+        ] = None
 
         # ========================================================
         # HISTORY
@@ -192,24 +255,371 @@ class RAGPipeline:
             )
 
         # ========================================================
-        # QUESTION UNDERSTANDING
+        # QUESTION VALIDATOR
         # ========================================================
-        # Petit appel LLM indépendant qui vérifie si la question
-        # est compréhensible AVANT le QueryRewriter.
+
         self.question_validator = ChatOllama(
             model=llm_model,
             temperature=0.0,
-            num_predict=128,
+            num_predict=160,
         )
+
+    # ============================================================
+    # JSON
+    # ============================================================
+
+    @staticmethod
+    def _parse_llm_json(
+        content: Any,
+    ) -> Dict[str, Any]:
+
+        text = str(
+            content
+        ).strip()
+
+        if text.startswith("```"):
+
+            lines = text.splitlines()
+
+            if (
+                lines
+                and lines[0].strip().startswith("```")
+            ):
+                lines = lines[1:]
+
+            if (
+                lines
+                and lines[-1].strip() == "```"
+            ):
+                lines = lines[:-1]
+
+            text = "\n".join(
+                lines
+            ).strip()
+
+        start = text.find("{")
+
+        if start == -1:
+            raise ValueError(
+                "Aucun objet JSON trouvé dans la réponse du LLM."
+            )
+
+        decoder = json.JSONDecoder()
+
+        data, _ = decoder.raw_decode(
+            text[start:]
+        )
+
+        if not isinstance(
+            data,
+            dict,
+        ):
+            raise ValueError(
+                "La réponse JSON du LLM n'est pas un objet."
+            )
+
+        return data
+
+    @staticmethod
+    def _parse_bool(
+        value: Any,
+        default: bool = False,
+    ) -> bool:
+
+        if isinstance(
+            value,
+            bool,
+        ):
+            return value
+
+        if isinstance(
+            value,
+            str,
+        ):
+
+            value = value.strip().lower()
+
+            if value == "true":
+                return True
+
+            if value == "false":
+                return False
+
+        return default
+
+    # ============================================================
+    # QUESTION VALIDATION
+    # ============================================================
+
+    def _validate_question(
+        self,
+        question: str,
+        history: str = "",
+    ) -> Dict[str, Any]:
+
+        history_context = (
+            history or ""
+        ).strip()
+
+        if len(history_context) > 3500:
+            history_context = history_context[-3500:]
+
+        prompt = f"""
+Tu es un classificateur pour un assistant de support
+TELNET SmartConnect.
+
+Retourne UNIQUEMENT un JSON valide :
+
+{{
+  "type": "smartconnect_question" | "conversational" | "invalid",
+  "reason": "courte explication"
+}}
+
+Règles :
+
+1. conversational :
+   salutations, remerciements, au revoir et petites formules sociales.
+
+2. smartconnect_question :
+   - toute demande liée au support SmartConnect/TELNET ;
+   - questions techniques ou fonctionnelles plausiblement couvertes
+     par la documentation ;
+   - API, authentification, JWT, token, appareils, configuration,
+     connexion, tableau de bord, erreurs, paramètres, etc. ;
+   - une question de suivi doit être considérée comme technique
+     si l'historique montre qu'elle continue une discussion SmartConnect.
+
+3. invalid :
+   - texte incompréhensible ;
+   - bruit aléatoire ;
+   - question clairement sans rapport avec SmartConnect/TELNET.
+
+4. Ne rejette PAS une question simplement parce que
+   "SmartConnect" ou "TELNET" n'est pas écrit.
+
+HISTORIQUE :
+{history_context if history_context else "(aucun historique)"}
+
+QUESTION :
+{question}
+
+JSON :
+"""
+
+        try:
+
+            response = (
+                self.question_validator.invoke(
+                    prompt
+                )
+            )
+
+            content = getattr(
+                response,
+                "content",
+                response,
+            )
+
+            data = self._parse_llm_json(
+                content
+            )
+
+            question_type = str(
+                data.get(
+                    "type",
+                    "invalid",
+                )
+            ).strip().lower()
+
+            reason = str(
+                data.get(
+                    "reason",
+                    "",
+                )
+            ).strip()
+
+            if question_type not in {
+                "smartconnect_question",
+                "conversational",
+                "invalid",
+            }:
+                question_type = "invalid"
+
+            return {
+                "type": question_type,
+                "reason": reason,
+                "validator_ok": True,
+            }
+
+        except Exception as exc:
+
+            logger.warning(
+                "Question Validator error | question=%r | error=%s",
+                question,
+                exc,
+            )
+
+            return {
+                "type": "smartconnect_question",
+                "reason": "validator_error_fallback",
+                "validator_ok": False,
+                "error": str(exc),
+            }
+
+    # ============================================================
+    # CONVERSATIONAL
+    # ============================================================
+
+    def _conversational_response(
+        self,
+        question: str,
+    ) -> str:
+
+        prompt = f"""
+Tu es un assistant de support TELNET SmartConnect.
+
+Réponds brièvement et naturellement à cette interaction.
+Ne parle pas de documents, de RAG ou de recherche.
+
+Message :
+{question}
+
+Réponse :
+"""
+
+        try:
+
+            response = (
+                self.question_validator.invoke(
+                    prompt
+                )
+            )
+
+            content = getattr(
+                response,
+                "content",
+                response,
+            )
+
+            return str(
+                content
+            ).strip()
+
+        except Exception:
+
+            return (
+                "Bonjour ! Comment puis-je vous aider "
+                "concernant SmartConnect ?"
+            )
+
+    # ============================================================
+    # HISTORY DEPENDENCY
+    # ============================================================
+
+    def _question_depends_on_history(
+        self,
+        question: str,
+        history: str,
+    ) -> Dict[str, Any]:
+
+        if (
+            not self.use_history
+            or not history.strip()
+        ):
+            return {
+                "needs_history": False,
+                "reason": "no_history",
+            }
+
+        if self.query_rewriter is None:
+            return {
+                "needs_history": False,
+                "reason": "rewriter_unavailable",
+            }
+
+        prompt = f"""
+Analyse si la question suivante dépend de l'historique.
+
+Retourne UNIQUEMENT un JSON valide :
+
+{{
+  "needs_history": true ou false,
+  "reason": "courte explication"
+}}
+
+Réponds true si la question utilise :
+- un pronom ;
+- une référence implicite ;
+- un élément déjà discuté ;
+- une formulation clairement liée à la question précédente.
+
+Réponds false si la question est autonome.
+
+HISTORIQUE :
+{history}
+
+QUESTION :
+{question}
+
+JSON :
+"""
+
+        try:
+
+            response = (
+                self.query_rewriter.llm.invoke(
+                    prompt
+                )
+            )
+
+            content = getattr(
+                response,
+                "content",
+                response,
+            )
+
+            data = self._parse_llm_json(
+                content
+            )
+
+            return {
+                "needs_history": self._parse_bool(
+                    data.get(
+                        "needs_history",
+                        False,
+                    )
+                ),
+                "reason": str(
+                    data.get(
+                        "reason",
+                        "",
+                    )
+                ).strip(),
+                "classifier_ok": True,
+            }
+
+        except Exception as exc:
+
+            logger.warning(
+                "History Dependency error | question=%r | error=%s",
+                question,
+                exc,
+            )
+
+            return {
+                "needs_history": False,
+                "reason": "classifier_error_fallback",
+                "classifier_ok": False,
+                "error": str(exc),
+            }
 
     # ============================================================
     # INITIALISATION
     # ============================================================
 
-    def _initialize_query_components(self) -> None:
-        """
-        Initialise Retriever et Generator.
-        """
+    def _initialize_query_components(
+        self,
+    ) -> None:
 
         vectorstore = getattr(
             self.vector_store,
@@ -223,13 +633,10 @@ class RAGPipeline:
                 "Appelez load_existing() ou build_index()."
             )
 
-        # ========================================================
-        # RETRIEVER
-        # ========================================================
-
         retriever_documents = (
             self.index_documents
-            if self.retrieval_type in ("bm25", "hybrid")
+            if self.retrieval_type
+            in ("bm25", "hybrid")
             else None
         )
 
@@ -241,11 +648,10 @@ class RAGPipeline:
             fetch_k=self.retrieval_fetch_k,
             lambda_mult=self.retrieval_lambda,
             hybrid_k=self.hybrid_k,
+            similarity_score_threshold=(
+                self.similarity_score_threshold
+            ),
         )
-
-        # ========================================================
-        # GENERATOR
-        # ========================================================
 
         self.generator = Generator(
             model_name=self.llm_model,
@@ -257,11 +663,11 @@ class RAGPipeline:
     # BUILD INDEX
     # ============================================================
 
-    def build_index(self) -> Dict[str, Any]:
+    def build_index(
+        self,
+    ) -> Dict[str, Any]:
 
-        # --------------------------------------------------------
-        # LOAD DOCUMENTS
-        # --------------------------------------------------------
+        start = time.perf_counter()
 
         documents = self.loader.load()
 
@@ -269,10 +675,6 @@ class RAGPipeline:
             raise ValueError(
                 "Aucun document trouvé."
             )
-
-        # --------------------------------------------------------
-        # CHUNKING
-        # --------------------------------------------------------
 
         chunks = (
             self.chunker.chunk_documents(
@@ -285,10 +687,6 @@ class RAGPipeline:
                 "Aucun chunk généré."
             )
 
-        # --------------------------------------------------------
-        # CHROMA
-        # --------------------------------------------------------
-
         self.vector_store.create_or_replace(
             chunks=chunks,
             embeddings=self.embeddings,
@@ -296,215 +694,87 @@ class RAGPipeline:
             embedding_model=self.embedding_model,
             chunking_version=self.chunking_version,
         )
-        self.index_documents = list(chunks)
 
-        # --------------------------------------------------------
-        # QUERY COMPONENTS
-        # --------------------------------------------------------
+        self.index_documents = list(
+            chunks
+        )
 
         self._initialize_query_components()
+
+        elapsed = (
+            time.perf_counter()
+            - start
+        )
+
+        logger.info(
+            "Index construit | documents=%d | chunks=%d | latency=%.3fs",
+            len(documents),
+            len(chunks),
+            elapsed,
+        )
 
         return {
             "documents": len(documents),
             "chunks": len(chunks),
+            "latency": elapsed,
         }
 
     # ============================================================
     # LOAD EXISTING
     # ============================================================
 
-    def load_existing(self, strict_compatibility: bool = True) -> None:
-        """Charge un index persistant et reconstruit les données auxiliaires nécessaires."""
+    def load_existing(
+        self,
+        strict_compatibility: bool = True,
+    ) -> None:
 
-        if strict_compatibility and not self.vector_store.is_compatible(
-            embedding_model=self.embedding_model,
-            chunking_version=self.chunking_version,
-        ):
-            manifest = self.vector_store.get_manifest()
-            if manifest:
-                raise ValueError(
-                    "Index Chroma incompatible avec la configuration actuelle : "
-                    f"embedding={manifest.get('embedding_model')!r}, "
-                    f"chunking={manifest.get('chunking_version')!r}."
+        if strict_compatibility:
+
+            compatible = (
+                self.vector_store.is_compatible(
+                    embedding_model=self.embedding_model,
+                    chunking_version=self.chunking_version,
                 )
-            if strict_compatibility:
+            )
+
+            if not compatible:
+
+                manifest = (
+                    self.vector_store.get_manifest()
+                )
+
+                if manifest:
+                    raise ValueError(
+                        "Index Chroma incompatible avec la configuration actuelle : "
+                        f"embedding={manifest.get('embedding_model')!r}, "
+                        f"chunking={manifest.get('chunking_version')!r}."
+                    )
+
                 raise ValueError(
-                    "Manifest Chroma absent. Utilisez strict_compatibility=False "
+                    "Manifest Chroma absent. "
+                    "Utilisez strict_compatibility=False "
                     "ou reconstruisez l'index."
                 )
 
-        self.vector_store.load(embeddings=self.embeddings)
-        self.index_documents = self.vector_store.get_documents()
+        self.vector_store.load(
+            embeddings=self.embeddings
+        )
+
+        self.index_documents = (
+            self.vector_store.get_documents()
+        )
+
         if not self.index_documents:
-            raise ValueError("Aucun chunk récupérable depuis l'index Chroma.")
+            raise ValueError(
+                "Aucun chunk récupérable depuis l'index Chroma."
+            )
 
         self._initialize_query_components()
 
-    # ============================================================
-    # QUESTION UNDERSTANDING
-    # ============================================================
-
-    def _check_question_understandability(
-        self,
-        question: str,
-    ) -> Tuple[bool, Dict[str, Any]]:
-        """
-        Détermine avec le LLM si la question est suffisamment
-        compréhensible pour être traitée par le RAG.
-
-        Important :
-        - cette étape intervient AVANT le QueryRewriter ;
-        - elle ne cherche pas la réponse ;
-        - elle vérifie uniquement si l'intention de l'utilisateur
-          peut être comprise ;
-        - une question courte mais claire ("JWT ?", "API ?")
-          peut être considérée comme compréhensible.
-        """
-
-        original_question = (
-            question or ""
-        ).strip()
-
-        if not original_question:
-            return (
-                False,
-                {
-                    "understandable": False,
-                    "reason": "empty_question",
-                },
-            )
-
-        prompt = f"""
-Tu es un classificateur de questions pour un chatbot de support
-TELNET SmartConnect.
-
-Ta seule tâche est de déterminer si la question de l'utilisateur
-est COMPRÉHENSIBLE, c'est-à-dire si son intention peut être
-identifiée suffisamment clairement pour lancer une recherche
-documentaire.
-
-Une question peut être courte et quand même être compréhensible.
-Exemples :
-- "JWT ?" -> compréhensible
-- "API ?" -> compréhensible
-- "Comment obtenir un token JWT ?" -> compréhensible
-- "Comment accéder aux données d'un device ?" -> compréhensible
-
-Une question est NON compréhensible si elle est manifestement
-aléatoire, vide de sens, composée de caractères sans intention
-identifiable ou trop ambiguë pour savoir ce que l'utilisateur
-demande.
-Exemples :
-- "jnkjl" -> non compréhensible
-- "vdvds" -> non compréhensible
-- "asdfgh" -> non compréhensible
-
-Ne juge pas si la question est vraie ou fausse.
-Ne cherche pas à répondre à la question.
-Ne la réécris pas.
-Juge uniquement sa compréhensibilité.
-
-Réponds UNIQUEMENT avec un JSON valide de cette forme :
-{{
-  "understandable": true ou false,
-  "reason": "courte explication"
-}}
-
-Question utilisateur :
-{original_question}
-"""
-
-        start = time.perf_counter()
-
-        try:
-            response = self.question_validator.invoke(prompt)
-
-            content = getattr(
-                response,
-                "content",
-                response,
-            )
-
-            if isinstance(content, list):
-                content = "".join(
-                    str(item)
-                    for item in content
-                )
-
-            content = str(content).strip()
-
-            # Nettoyage minimal si le modèle entoure le JSON
-            # avec ```json ... ```.
-            content = re.sub(
-                r"^```(?:json)?\s*",
-                "",
-                content,
-                flags=re.IGNORECASE,
-            )
-            content = re.sub(
-                r"\s*```$",
-                "",
-                content,
-            ).strip()
-
-            import json
-
-            result = json.loads(content)
-
-            understandable = result.get(
-                "understandable"
-            )
-
-            if isinstance(
-                understandable,
-                str,
-            ):
-                understandable = (
-                    understandable.lower()
-                    in {
-                        "true",
-                        "1",
-                        "yes",
-                        "oui",
-                    }
-                )
-
-            understandable = bool(
-                understandable
-            )
-
-            return (
-                understandable,
-                {
-                    "understandable": understandable,
-                    "reason": str(
-                        result.get(
-                            "reason",
-                            "",
-                        )
-                    ),
-                    "latency": (
-                        time.perf_counter()
-                        - start
-                    ),
-                },
-            )
-
-        except Exception as exc:
-            # En cas d'échec du classificateur, on ne bloque pas
-            # une vraie question : on laisse le pipeline continuer.
-            return (
-                True,
-                {
-                    "understandable": True,
-                    "reason": "validator_error_fallback",
-                    "error": str(exc),
-                    "latency": (
-                        time.perf_counter()
-                        - start
-                    ),
-                },
-            )
+        logger.info(
+            "Index existant chargé | chunks=%d",
+            len(self.index_documents),
+        )
 
     # ============================================================
     # QUERY REWRITING
@@ -519,10 +789,6 @@ Question utilisateur :
             question or ""
         ).strip()
 
-        # --------------------------------------------------------
-        # DISABLED
-        # --------------------------------------------------------
-
         if not self.enable_query_rewriting:
 
             return (
@@ -535,10 +801,6 @@ Question utilisateur :
                     "reason": "disabled",
                 },
             )
-
-        # --------------------------------------------------------
-        # REWRITER UNAVAILABLE
-        # --------------------------------------------------------
 
         if self.query_rewriter is None:
 
@@ -553,10 +815,6 @@ Question utilisateur :
                 },
             )
 
-        # --------------------------------------------------------
-        # HISTORY DISABLED
-        # --------------------------------------------------------
-
         if not self.use_history:
 
             return (
@@ -570,10 +828,6 @@ Question utilisateur :
                     "reason": "history_disabled",
                 },
             )
-
-        # --------------------------------------------------------
-        # HISTORY
-        # --------------------------------------------------------
 
         history_for_rewriter = (
             self.history.get_context_for_rewriting(
@@ -596,10 +850,6 @@ Question utilisateur :
                 },
             )
 
-        # --------------------------------------------------------
-        # REWRITE
-        # --------------------------------------------------------
-
         start = time.perf_counter()
 
         try:
@@ -616,6 +866,12 @@ Question utilisateur :
             elapsed = (
                 time.perf_counter()
                 - start
+            )
+
+            logger.warning(
+                "Query rewriting error | question=%r | error=%s",
+                original_question,
+                exc,
             )
 
             return (
@@ -649,18 +905,152 @@ Question utilisateur :
             != original_question.lower()
         )
 
-        metadata = {
-            "enabled": True,
-            "rewritten": was_rewritten,
-            "original_query": original_question,
-            "search_query": rewritten_query,
-            "history_used": True,
-            "rewriter_latency": elapsed,
-        }
-
         return (
             rewritten_query,
+            {
+                "enabled": True,
+                "rewritten": was_rewritten,
+                "original_query": original_question,
+                "search_query": rewritten_query,
+                "history_used": True,
+                "rewriter_latency": elapsed,
+            },
+        )
+
+    # ============================================================
+    # SCORE TYPE
+    # ============================================================
+
+    def _get_score_type(self) -> str:
+
+        if self.retrieval_type == "bm25":
+            return "bm25"
+
+        if self.retrieval_type == "hybrid":
+            return "rrf"
+
+        return "vector_relevance"
+
+    # ============================================================
+    # RELEVANCE THRESHOLD
+    # ============================================================
+
+    def _get_relevance_threshold(
+        self,
+    ) -> Optional[float]:
+
+        if self.retrieval_type == "bm25":
+            return self.bm25_relevance_threshold
+
+        if self.retrieval_type == "hybrid":
+            return self.hybrid_relevance_threshold
+
+        if self.retrieval_type == "similarity_score_threshold":
+            return self.similarity_score_threshold
+
+        return self.relevance_threshold
+
+    # ============================================================
+    # RELEVANCE GATE
+    # ============================================================
+
+    def _apply_relevance_gate(
+        self,
+        results: List[Tuple[Document, float]],
+    ) -> Tuple[
+        List[Tuple[Document, float]],
+        Dict[str, Any],
+    ]:
+
+        threshold = (
+            self._get_relevance_threshold()
+        )
+
+        score_type = (
+            self._get_score_type()
+        )
+
+        if not results:
+
+            return (
+                [],
+                {
+                    "input_count": 0,
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "threshold": threshold,
+                    "applied": threshold is not None,
+                    "score_type": score_type,
+                },
+            )
+
+        relevant = []
+        rejected = []
+
+        for document, score in results:
+
+            score = float(
+                score
+            )
+
+            if (
+                threshold is None
+                or score >= threshold
+            ):
+
+                relevant.append(
+                    (
+                        document,
+                        score,
+                    )
+                )
+
+            else:
+
+                rejected.append(
+                    (
+                        document,
+                        score,
+                    )
+                )
+
+        metadata = {
+            "input_count": len(results),
+            "accepted_count": len(relevant),
+            "rejected_count": len(rejected),
+            "threshold": threshold,
+            "applied": threshold is not None,
+            "score_type": score_type,
+        }
+
+        logger.info(
+            "Relevance Gate | "
+            "type=%s | input=%d | accepted=%d | "
+            "rejected=%d | threshold=%s",
+            score_type,
+            len(results),
+            len(relevant),
+            len(rejected),
+            threshold,
+        )
+
+        return (
+            relevant,
             metadata,
+        )
+
+    def _score_is_accepted(
+        self,
+        score: float,
+    ) -> bool:
+
+        threshold = (
+            self._get_relevance_threshold()
+        )
+
+        return (
+            threshold is None
+            or float(score) >= threshold
         )
 
     # ============================================================
@@ -687,13 +1077,15 @@ Question utilisateur :
 
             source = (
                 metadata.get("source")
+                or metadata.get("relative_path")
                 or metadata.get("file_path")
                 or metadata.get("filename")
                 or ""
             )
 
-            chunk_id = metadata.get(
-                "chunk_id"
+            chunk_id = (
+                metadata.get("chunk_id")
+                or ""
             )
 
             key = (
@@ -706,115 +1098,11 @@ Question utilisateur :
                 continue
 
             seen.add(key)
-
             unique_documents.append(
                 document
             )
 
         return unique_documents
-
-    # ============================================================
-    # RELEVANCE GATE
-    # ============================================================
-
-    def _apply_relevance_gate(
-        self,
-        results: List[Tuple[Document, float]],
-    ) -> Tuple[
-        List[Tuple[Document, float]],
-        Dict[str, Any],
-    ]:
-
-        threshold = (
-            self.bm25_relevance_threshold
-            if self.retrieval_type == "bm25"
-            else self.hybrid_relevance_threshold
-            if self.retrieval_type == "hybrid"
-            else self.relevance_threshold
-        )
-
-        if not results:
-            return (
-                [],
-                {
-                    "input_count": 0,
-                    "accepted_count": 0,
-                    "rejected_count": 0,
-                    "threshold": threshold,
-                    "applied": threshold is not None,
-                    "score_type": (
-                        "bm25"
-                        if self.retrieval_type == "bm25"
-                        else "hybrid"
-                        if self.retrieval_type == "hybrid"
-                        else "relevance"
-                    ),
-                },
-            )
-
-        relevant = []
-        rejected = []
-
-        for document, score in results:
-            score = float(score)
-
-            if threshold is None or score >= threshold:
-
-                relevant.append(
-                    (
-                        document,
-                        score,
-                    )
-                )
-
-            else:
-
-                rejected.append(
-                    (
-                        document,
-                        score,
-                    )
-                )
-
-        metadata = {
-            "input_count": len(results),
-            "accepted_count": len(relevant),
-            "rejected_count": len(rejected),
-            "threshold": threshold,
-            "applied": threshold is not None,
-            "score_type": (
-                "bm25"
-                if self.retrieval_type == "bm25"
-                else "hybrid"
-                if self.retrieval_type == "hybrid"
-                else "relevance"
-            ),
-        }
-
-        return (
-            relevant,
-            metadata,
-        )
-
-    def _score_is_accepted(self, score: float) -> bool:
-        """
-        Check if a score meets the relevance threshold.
-
-        Args:
-            score: The relevance score to check
-
-        Returns:
-            True if the score is accepted, False otherwise
-        """
-        threshold = (
-            self.bm25_relevance_threshold
-            if self.retrieval_type == "bm25"
-            else self.hybrid_relevance_threshold
-            if self.retrieval_type == "hybrid"
-            else self.relevance_threshold
-        )
-
-        return threshold is None or score >= threshold
 
     # ============================================================
     # ASK
@@ -825,15 +1113,23 @@ Question utilisateur :
         question: str,
     ) -> Dict[str, Any]:
 
+        start_total = time.perf_counter()
+
         question = (
             question or ""
         ).strip()
 
         if not question:
-
             raise ValueError(
                 "La question ne peut pas être vide."
             )
+
+        logger.info("=" * 70)
+
+        logger.info(
+            "Nouvelle question | question=%r",
+            question,
+        )
 
         # ========================================================
         # INITIALISATION
@@ -843,7 +1139,6 @@ Question utilisateur :
             self.retriever is None
             or self.generator is None
         ):
-
             self._initialize_query_components()
 
         # ========================================================
@@ -863,33 +1158,48 @@ Question utilisateur :
             history_text = ""
 
         # ========================================================
-        # QUESTION UNDERSTANDING
+        # VALIDATION
         # ========================================================
-        # Cette vérification est volontairement placée AVANT
-        # le QueryRewriter.
-        (
-            question_understandable,
-            understanding_metadata,
-        ) = self._check_question_understandability(
-            question
+
+        validation_trace = (
+            self._validate_question(
+                question=question,
+                history=history_text,
+            )
         )
 
-        if not question_understandable:
+        question_type = validation_trace.get(
+            "type",
+            "invalid",
+        )
+
+        # ========================================================
+        # CONVERSATIONAL
+        # ========================================================
+
+        if question_type == "conversational":
 
             answer = (
-                "Je n'ai pas compris votre question. "
-                "Veuillez reformuler votre demande concernant "
-                "SmartConnect."
+                self._conversational_response(
+                    question
+                )
             )
 
             if self.use_history:
+
                 self.history.add_user_message(
                     question
                 )
+
                 self.history.add_assistant_message(
                     answer,
                     sources=[],
                 )
+
+            total_latency = (
+                time.perf_counter()
+                - start_total
+            )
 
             return {
                 "answer": answer,
@@ -899,51 +1209,203 @@ Question utilisateur :
                 "scores": [],
                 "source_documents": [],
                 "retrieval_scores": [],
+                "query_type": "conversational",
                 "retrieved_count": 0,
                 "relevant_count": 0,
-                "relevance_threshold": (
-                    self.relevance_threshold
-                ),
-                "relevance_gate": {
-                    "input_count": 0,
-                    "accepted_count": 0,
-                    "rejected_count": 0,
-                    "threshold": (
-                        self.relevance_threshold
-                    ),
-                    "applied": False,
-                    "score_type": "not_retrieved",
-                },
-                "question_understanding": (
-                    understanding_metadata
-                ),
-                "query_rewrite": {
-                    "enabled": bool(
-                        self.enable_query_rewriting
-                    ),
-                    "rewritten": False,
-                    "original_query": question,
-                    "search_query": question,
-                    "reason": (
-                        "question_not_understandable"
-                    ),
+                "trace": {
+                    "original_question": question,
+                    "validation": validation_trace,
+                    "history_dependency": {
+                        "needs_history": False,
+                        "reason": "conversational",
+                    },
+                    "query_rewriting": {
+                        "enabled": self.enable_query_rewriting,
+                        "rewritten": False,
+                        "original_query": question,
+                        "search_query": question,
+                        "reason": "not_needed_conversational",
+                    },
+                    "retrieval": {
+                        "configured_method": self.retrieval_type,
+                        "k": self.retrieval_k,
+                        "result_count": 0,
+                        "executed": False,
+                        "reason": "conversational",
+                    },
+                    "relevance_gate": {
+                        "input_count": 0,
+                        "accepted_count": 0,
+                        "rejected_count": 0,
+                        "applied": False,
+                        "reason": "conversational",
+                    },
+                    "documents": [],
+                    "context": {
+                        "selected_count": 0,
+                        "scores": [],
+                    },
+                    "generation": {
+                        "executed": True,
+                        "reason": "conversational",
+                    },
+                    "history": {
+                        "enabled": self.use_history,
+                        "messages": len(self.history),
+                    },
+                    "latency": {
+                        "total": total_latency,
+                        "query_rewriting": 0.0,
+                        "retrieval": 0.0,
+                        "generation": total_latency,
+                    },
                 },
             }
+
+        # ========================================================
+        # INVALID
+        # ========================================================
+
+        if question_type == "invalid":
+
+            answer = (
+                "Je n'ai pas compris votre demande. "
+                "Veuillez reformuler votre question concernant "
+                "SmartConnect."
+            )
+
+            if self.use_history:
+
+                self.history.add_user_message(
+                    question
+                )
+
+                self.history.add_assistant_message(
+                    answer,
+                    sources=[],
+                )
+
+            total_latency = (
+                time.perf_counter()
+                - start_total
+            )
+
+            return {
+                "answer": answer,
+                "question": question,
+                "search_query": question,
+                "documents": [],
+                "scores": [],
+                "source_documents": [],
+                "retrieval_scores": [],
+                "query_type": "invalid",
+                "retrieved_count": 0,
+                "relevant_count": 0,
+                "trace": {
+                    "original_question": question,
+                    "validation": validation_trace,
+                    "history_dependency": {
+                        "needs_history": False,
+                        "reason": "invalid",
+                    },
+                    "query_rewriting": {
+                        "enabled": self.enable_query_rewriting,
+                        "rewritten": False,
+                        "original_query": question,
+                        "search_query": question,
+                        "reason": "not_needed_invalid",
+                    },
+                    "retrieval": {
+                        "configured_method": self.retrieval_type,
+                        "k": self.retrieval_k,
+                        "result_count": 0,
+                        "executed": False,
+                        "reason": "invalid",
+                    },
+                    "relevance_gate": {
+                        "input_count": 0,
+                        "accepted_count": 0,
+                        "rejected_count": 0,
+                        "applied": False,
+                        "reason": "invalid",
+                    },
+                    "documents": [],
+                    "context": {
+                        "selected_count": 0,
+                        "scores": [],
+                    },
+                    "generation": {
+                        "executed": False,
+                        "reason": "invalid",
+                    },
+                    "history": {
+                        "enabled": self.use_history,
+                        "messages": len(self.history),
+                    },
+                    "latency": {
+                        "total": total_latency,
+                        "query_rewriting": 0.0,
+                        "retrieval": 0.0,
+                        "generation": 0.0,
+                    },
+                },
+            }
+
+        # ========================================================
+        # HISTORY DEPENDENCY
+        # ========================================================
+
+        history_dependency_trace = (
+            self._question_depends_on_history(
+                question=question,
+                history=history_text,
+            )
+        )
+
+        needs_history = bool(
+            history_dependency_trace.get(
+                "needs_history",
+                False,
+            )
+        )
 
         # ========================================================
         # QUERY REWRITING
         # ========================================================
 
-        (
-            search_query,
-            _rewrite_metadata,
-        ) = self._rewrite_query(
-            question
-        )
+        if needs_history:
+
+            (
+                search_query,
+                rewrite_trace,
+            ) = self._rewrite_query(
+                question
+            )
+
+        else:
+
+            search_query = question
+
+            rewrite_trace = {
+                "enabled": self.enable_query_rewriting,
+                "rewritten": False,
+                "original_query": question,
+                "search_query": question,
+                "history_used": False,
+                "reason": "question_independent_of_history",
+            }
+
+            # Une question autonome ne doit pas être polluée
+            # par l'historique dans le Generator.
+            history_text = ""
 
         # ========================================================
         # RETRIEVAL
         # ========================================================
+
+        retrieval_start = (
+            time.perf_counter()
+        )
 
         retrieval_results = (
             self.retriever.retrieve_with_scores(
@@ -952,13 +1414,46 @@ Question utilisateur :
             )
         )
 
+        retrieval_latency = (
+            time.perf_counter()
+            - retrieval_start
+        )
+
+        score_type = (
+            self._get_score_type()
+        )
+
+        for rank, (
+            document,
+            score,
+        ) in enumerate(
+            retrieval_results,
+            start=1,
+        ):
+
+            logger.info(
+                "RESULT %d | score=%.6f | type=%s | source=%s | preview=%s",
+                rank,
+                float(score),
+                score_type,
+                (document.metadata or {}).get(
+                    "source"
+                ),
+                (document.page_content or "")[
+                    :100
+                ].replace(
+                    "\n",
+                    " ",
+                ),
+            )
+
         # ========================================================
         # RELEVANCE GATE
         # ========================================================
 
         (
             relevant_results,
-            _gate_metadata,
+            gate_trace,
         ) = self._apply_relevance_gate(
             retrieval_results
         )
@@ -968,31 +1463,61 @@ Question utilisateur :
         # ========================================================
 
         seen = set()
-        documents_with_scores = []
+
+        documents_with_scores: List[
+            Tuple[Document, float]
+        ] = []
 
         for document, score in relevant_results:
-            content = (document.page_content or "").strip()
-            metadata = document.metadata or {}
+
+            content = (
+                document.page_content or ""
+            ).strip()
+
+            metadata = (
+                document.metadata or {}
+            )
+
             source = (
                 metadata.get("source")
                 or metadata.get("relative_path")
+                or metadata.get("file_path")
                 or metadata.get("filename")
                 or ""
             )
-            chunk_id = metadata.get("chunk_id")
-            key = (source, chunk_id, content)
+
+            chunk_id = (
+                metadata.get(
+                    "chunk_id"
+                )
+                or ""
+            )
+
+            key = (
+                source,
+                chunk_id,
+                content,
+            )
+
             if key in seen:
                 continue
+
             seen.add(key)
-            document.metadata["retrieval_score"] = float(score)
-            document.metadata["retrieval_score_type"] = (
-                "bm25"
-                if self.retrieval_type == "bm25"
-                else "hybrid"
-                if self.retrieval_type == "hybrid"
-                else "vector_relevance"
+
+            document.metadata[
+                "retrieval_score"
+            ] = float(score)
+
+            document.metadata[
+                "retrieval_score_type"
+            ] = score_type
+
+            documents_with_scores.append(
+                (
+                    document,
+                    float(score),
+                )
             )
-            documents_with_scores.append((document, float(score)))
 
         # ========================================================
         # CONTEXT LIMIT
@@ -1017,8 +1542,71 @@ Question utilisateur :
         ]
 
         # ========================================================
+        # TRACE DOCUMENTS
+        # ========================================================
+
+        documents_trace = []
+
+        threshold = (
+            self._get_relevance_threshold()
+        )
+
+        for rank, (
+            document,
+            score,
+        ) in enumerate(
+            retrieval_results,
+            start=1,
+        ):
+
+            metadata = (
+                document.metadata or {}
+            )
+
+            documents_trace.append(
+                {
+                    "rank": rank,
+                    "score": float(score),
+                    "score_type": score_type,
+                    "source": metadata.get(
+                        "source"
+                    ),
+                    "file": metadata.get(
+                        "filename"
+                    ),
+                    "filename": metadata.get(
+                        "filename"
+                    ),
+                    "page": metadata.get(
+                        "page"
+                    ),
+                    "chunk_id": metadata.get(
+                        "chunk_id"
+                    ),
+                    "accepted": (
+                        threshold is None
+                        or float(score) >= threshold
+                    ),
+                    "preview": (
+                        (
+                            document.page_content
+                            or ""
+                        )[:300]
+                        .replace(
+                            "\n",
+                            " ",
+                        )
+                    ),
+                }
+            )
+
+        # ========================================================
         # GENERATION
         # ========================================================
+
+        generation_start = (
+            time.perf_counter()
+        )
 
         if not relevant_documents:
 
@@ -1028,6 +1616,11 @@ Question utilisateur :
                 "documentation disponible pour répondre "
                 "à cette question."
             )
+
+            generation_trace = {
+                "executed": False,
+                "reason": "no_relevant_documents",
+            }
 
         else:
 
@@ -1053,11 +1646,31 @@ Question utilisateur :
                     ),
                 )
 
+                generation_trace = {
+                    "executed": True,
+                    "validation_passed": (
+                        generator_result.get(
+                            "validation_passed",
+                            True,
+                        )
+                    ),
+                }
+
             else:
 
                 answer = str(
                     generator_result
                 )
+
+                generation_trace = {
+                    "executed": True,
+                    "validation_passed": True,
+                }
+
+        generation_latency = (
+            time.perf_counter()
+            - generation_start
+        )
 
         answer = (
             answer or ""
@@ -1080,11 +1693,9 @@ Question utilisateur :
                     "source": metadata.get(
                         "source"
                     ),
-
                     "page": metadata.get(
                         "page"
                     ),
-
                     "chunk_id": metadata.get(
                         "chunk_id"
                     ),
@@ -1103,28 +1714,113 @@ Question utilisateur :
             )
 
         # ========================================================
+        # LATENCY
+        # ========================================================
+
+        total_latency = (
+            time.perf_counter()
+            - start_total
+        )
+
+        # ========================================================
+        # TRACE
+        # ========================================================
+
+        trace = {
+            "original_question": question,
+
+            "validation": validation_trace,
+
+            "history_dependency": (
+                history_dependency_trace
+            ),
+
+            "query_rewriting": rewrite_trace,
+
+            "retrieval": {
+                "configured_method": self.retrieval_type,
+                "score_type": score_type,
+                "k": self.retrieval_k,
+                "fetch_k": self.retrieval_fetch_k,
+                "lambda": self.retrieval_lambda,
+                "hybrid_k": self.hybrid_k,
+                "query": search_query,
+                "latency": retrieval_latency,
+                "result_count": len(
+                    retrieval_results
+                ),
+            },
+
+            "relevance_gate": gate_trace,
+
+            "documents": documents_trace,
+
+            "context": {
+                "selected_count": len(
+                    relevant_documents
+                ),
+                "max_context_documents": (
+                    self.max_context_documents
+                ),
+                "scores": relevant_scores,
+                "score_type": score_type,
+            },
+
+            "generation": {
+                "model": self.llm_model,
+                "latency": generation_latency,
+                **generation_trace,
+            },
+
+            "history": {
+                "enabled": self.use_history,
+                "messages": len(
+                    self.history
+                ),
+            },
+
+            "latency": {
+                "total": total_latency,
+                "query_rewriting": rewrite_trace.get(
+                    "rewriter_latency",
+                    0.0,
+                ),
+                "retrieval": retrieval_latency,
+                "generation": generation_latency,
+            },
+        }
+
+        logger.info(
+            "Question terminée | total_latency=%.3fs",
+            total_latency,
+        )
+
+        logger.info("=" * 70)
+
+        # ========================================================
         # RESULT
         # ========================================================
 
         return {
-
             "answer": answer,
-
             "question": question,
-
             "search_query": search_query,
 
             "documents": relevant_documents,
-
             "scores": relevant_scores,
 
-            # Compatibilité avec main.py
-            "source_documents": (
-                relevant_documents
-            ),
+            "source_documents": relevant_documents,
+            "retrieval_scores": relevant_scores,
 
-            "retrieval_scores": (
-                relevant_scores
+            "retrieval_score_type": score_type,
+
+            "query_type": (
+                "rewritten"
+                if rewrite_trace.get(
+                    "rewritten",
+                    False,
+                )
+                else "standalone"
             ),
 
             "retrieved_count": len(
@@ -1134,9 +1830,8 @@ Question utilisateur :
             "relevant_count": len(
                 relevant_documents
             ),
-            "question_understanding": (
-                understanding_metadata
-            ),
+
+            "trace": trace,
         }
 
     # ============================================================
@@ -1149,7 +1844,9 @@ Question utilisateur :
 
         return self.history.get_history()
 
-    def clear_history(self) -> None:
+    def clear_history(
+        self,
+    ) -> None:
 
         self.history.clear()
 
@@ -1168,17 +1865,14 @@ Question utilisateur :
     # STATUS
     # ============================================================
 
-    def status(self) -> Dict[str, Any]:
+    def status(
+        self,
+    ) -> Dict[str, Any]:
 
         return {
-
             "data_dir": self.data_dir,
-
             "db_dir": self.db_dir,
-
-            "collection_name": (
-                self.collection_name
-            ),
+            "collection_name": self.collection_name,
 
             "embedding_model": (
                 self.embedding_model
@@ -1202,13 +1896,27 @@ Question utilisateur :
                 self.retrieval_lambda
             ),
 
-            "relevance_threshold": self.relevance_threshold,
+            "hybrid_k": self.hybrid_k,
 
-            "bm25_relevance_threshold": self.bm25_relevance_threshold,
+            "relevance_threshold": (
+                self.relevance_threshold
+            ),
 
-            "hybrid_relevance_threshold": self.hybrid_relevance_threshold,
+            "bm25_relevance_threshold": (
+                self.bm25_relevance_threshold
+            ),
 
-            "chunking_version": self.chunking_version,
+            "hybrid_relevance_threshold": (
+                self.hybrid_relevance_threshold
+            ),
+
+            "similarity_score_threshold": (
+                self.similarity_score_threshold
+            ),
+
+            "chunking_version": (
+                self.chunking_version
+            ),
 
             "history_enabled": (
                 self.use_history
@@ -1221,7 +1929,6 @@ Question utilisateur :
             "query_rewriting": (
                 self.enable_query_rewriting
             ),
-            "question_understanding": True,
 
             "retriever_initialized": (
                 self.retriever is not None
@@ -1231,3 +1938,4 @@ Question utilisateur :
                 self.generator is not None
             ),
         }
+

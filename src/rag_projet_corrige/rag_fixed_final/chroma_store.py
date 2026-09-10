@@ -4,7 +4,6 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 

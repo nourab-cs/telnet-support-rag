@@ -1,35 +1,30 @@
+
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
+
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi
 
 
+logger = logging.getLogger(__name__)
+
+
 class Retriever:
     """
-    Retriever supportant :
+    Retriever RAG TELNET SmartConnect.
 
+    Méthodes supportées :
     - similarity
     - mmr
     - similarity_score_threshold
-
     - bm25
+    - hybrid
 
-    - hybrid (combinaison vectorielle + BM25 via RRF pur)
-
-    Les recherches vectorielles utilisent Chroma/LangChain.
-
-    La recherche BM25 est lexicale et fonctionne directement
-    sur la liste des chunks fournie au constructeur.
-
-    La recherche hybride combine les résultats vectoriels et BM25
-    en utilisant l'algorithme RRF (Reciprocal Rank Fusion) pur.
-
-    IMPORTANT :
-    Les scores vectoriels et BM25 ne sont pas comparables
-    directement. Le Relevance Gate doit donc être calibré
-    séparément pour BM25 et hybrid.
+    Pour BM25 et Hybrid, les scores ne sont PAS des scores vectoriels.
+    Ils doivent donc être calibrés séparément dans le Pipeline.
     """
 
     VALID_SEARCH_TYPES = {
@@ -49,7 +44,9 @@ class Retriever:
         fetch_k: int = 20,
         lambda_mult: float = 0.6,
         hybrid_k: int = 10,
-    ):
+        similarity_score_threshold: Optional[float] = None,
+    ) -> None:
+
         if vectordb is None:
             raise ValueError("vectordb ne peut pas être None.")
 
@@ -59,14 +56,23 @@ class Retriever:
                 f"Valeurs autorisées : {sorted(self.VALID_SEARCH_TYPES)}"
             )
 
-        if k <= 0:
+        if int(k) <= 0:
             raise ValueError("k doit être > 0.")
 
-        if fetch_k <= 0:
+        if int(fetch_k) <= 0:
             raise ValueError("fetch_k doit être > 0.")
 
-        if lambda_mult < 0.0 or lambda_mult > 1.0:
+        if not 0.0 <= float(lambda_mult) <= 1.0:
             raise ValueError("lambda_mult doit être compris entre 0 et 1.")
+
+        if int(hybrid_k) <= 0:
+            raise ValueError("hybrid_k doit être > 0.")
+
+        if similarity_score_threshold is not None:
+            if not 0.0 <= float(similarity_score_threshold) <= 1.0:
+                raise ValueError(
+                    "similarity_score_threshold doit être compris entre 0 et 1."
+                )
 
         if search_type in ("bm25", "hybrid") and not documents:
             raise ValueError(
@@ -75,15 +81,20 @@ class Retriever:
             )
 
         self.vectordb = vectordb
-        self.documents = documents or []
+        self.documents = list(documents or [])
 
-        self.k = k
+        self.k = int(k)
         self.search_type = search_type
-        self.fetch_k = fetch_k
-        self.lambda_mult = lambda_mult
-        self.hybrid_k = hybrid_k
+        self.fetch_k = int(fetch_k)
+        self.lambda_mult = float(lambda_mult)
+        self.hybrid_k = int(hybrid_k)
 
-        # BM25
+        self.similarity_score_threshold = (
+            None
+            if similarity_score_threshold is None
+            else float(similarity_score_threshold)
+        )
+
         self.bm25 = None
         self.bm25_documents: List[Document] = []
 
@@ -99,26 +110,42 @@ class Retriever:
     @staticmethod
     def _tokenize(text: str) -> List[str]:
         """
-        Tokenisation simple adaptée à un corpus technique français.
+        Tokenisation adaptée aux documents techniques.
 
-        On conserve notamment :
-        - mots
-        - chiffres
-        - versions
-        - chemins
-        - endpoints
-        - termes techniques
+        Exemple :
+            https://host/api/devices
+        produit notamment :
+            https
+            host
+            api
+            devices
+
+        tout en conservant aussi les tokens techniques complets.
         """
 
         if not text:
             return []
 
-        text = text.lower()
+        text = str(text).lower()
 
-        tokens = re.findall(
-            r"[a-zàâçéèêëîïôûùüÿñæœ0-9_./:-]+",
+        full_tokens = re.findall(
+            r"[a-zàâçéèêëîïôûùüÿñæœ0-9_]+"
+            r"(?:[./:-][a-zàâçéèêëîïôûùüÿñæœ0-9_]+)*",
             text,
         )
+
+        atomic_tokens = re.findall(
+            r"[a-zàâçéèêëîïôûùüÿñæœ0-9_]+",
+            text,
+        )
+
+        tokens: List[str] = []
+        seen = set()
+
+        for token in full_tokens + atomic_tokens:
+            if token not in seen:
+                seen.add(token)
+                tokens.append(token)
 
         return tokens
 
@@ -127,7 +154,6 @@ class Retriever:
     # ============================================================
 
     def _initialize_bm25(self) -> None:
-        """Construit l'index BM25 à partir des chunks."""
 
         if BM25Okapi is None:
             raise ImportError(
@@ -138,25 +164,40 @@ class Retriever:
         self.bm25_documents = list(self.documents)
 
         tokenized_documents = [
-            self._tokenize(doc.page_content)
+            self._tokenize(doc.page_content or "")
             for doc in self.bm25_documents
         ]
 
+        if not any(tokenized_documents):
+            raise ValueError(
+                "Aucun token exploitable n'a été trouvé dans les documents BM25."
+            )
+
         self.bm25 = BM25Okapi(tokenized_documents)
+
+        logger.info(
+            "Index BM25 initialisé | documents=%d",
+            len(self.bm25_documents),
+        )
 
     # ============================================================
     # CONSTRUCTION RETRIEVER LANGCHAIN
     # ============================================================
 
     def _build_retriever(self):
-        """
-        Construit le retriever vectoriel LangChain.
-
-        BM25 et hybrid sont traités séparément.
-        """
 
         if self.search_type in ("bm25", "hybrid"):
             return None
+
+        if self.search_type == "mmr":
+            return self.vectordb.as_retriever(
+                search_type="mmr",
+                search_kwargs={
+                    "k": self.k,
+                    "fetch_k": max(self.fetch_k, self.k),
+                    "lambda_mult": self.lambda_mult,
+                },
+            )
 
         if self.search_type == "similarity":
             return self.vectordb.as_retriever(
@@ -166,19 +207,10 @@ class Retriever:
                 },
             )
 
-        if self.search_type == "mmr":
-            return self.vectordb.as_retriever(
-                search_type="mmr",
-                search_kwargs={
-                    "k": self.k,
-                    "fetch_k": self.fetch_k,
-                    "lambda_mult": self.lambda_mult,
-                },
-            )
-
         if self.search_type == "similarity_score_threshold":
-            # Le threshold n'est volontairement PAS appliqué ici.
-            # Le Relevance Gate est géré au niveau Pipeline.
+            # Le threshold est appliqué explicitement dans
+            # retrieve_with_scores(). Cela évite les différences
+            # de comportement entre versions de LangChain/Chroma.
             return self.vectordb.as_retriever(
                 search_type="similarity",
                 search_kwargs={
@@ -191,7 +223,115 @@ class Retriever:
         )
 
     # ============================================================
-    # RECHERCHE BM25
+    # OUTILS DOCUMENT
+    # ============================================================
+
+    @staticmethod
+    def _document_key(document: Document) -> Tuple[str, str, str]:
+        metadata = document.metadata or {}
+
+        source = str(
+            metadata.get("source")
+            or metadata.get("relative_path")
+            or metadata.get("file_path")
+            or metadata.get("filename")
+            or ""
+        )
+
+        chunk_id = str(
+            metadata.get("chunk_id")
+            or ""
+        )
+
+        content = str(
+            document.page_content
+            or ""
+        )
+
+        return source, chunk_id, content
+
+    # ============================================================
+    # SCORE VECTORIEL
+    # ============================================================
+
+    @staticmethod
+    def _normalize_relevance_score(score: float) -> float:
+        """
+        Normalise uniquement pour protéger le Pipeline.
+
+        Le score produit par LangChain/Chroma est conservé dans sa
+        sémantique d'origine. On borne simplement les valeurs afin
+        d'éviter les valeurs invalides pour le Relevance Gate.
+        """
+
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if score != score:
+            return 0.0
+
+        return max(
+            0.0,
+            min(1.0, score),
+        )
+
+    def _vector_similarity_results(
+        self,
+        query: str,
+        k: int,
+    ) -> List[Tuple[Document, float]]:
+
+        if k <= 0:
+            return []
+
+        raw_results = (
+            self.vectordb.similarity_search_with_relevance_scores(
+                query,
+                k=k,
+            )
+        )
+
+        results: List[Tuple[Document, float]] = []
+
+        for document, raw_score in raw_results:
+
+            score = self._normalize_relevance_score(
+                raw_score
+            )
+
+            results.append(
+                (
+                    document,
+                    score,
+                )
+            )
+
+        return results
+
+    # ============================================================
+    # SIMILARITY SCORE THRESHOLD
+    # ============================================================
+
+    def _apply_similarity_threshold(
+        self,
+        results: List[Tuple[Document, float]],
+    ) -> List[Tuple[Document, float]]:
+
+        threshold = self.similarity_score_threshold
+
+        if threshold is None:
+            return results
+
+        return [
+            (document, score)
+            for document, score in results
+            if score >= threshold
+        ]
+
+    # ============================================================
+    # BM25
     # ============================================================
 
     def _bm25_search(
@@ -199,43 +339,66 @@ class Retriever:
         query: str,
         k: Optional[int] = None,
     ) -> List[Tuple[Document, float]]:
-        """
-        Recherche lexicale BM25.
-
-        Retourne :
-            [(Document, score), ...]
-        """
 
         if self.bm25 is None:
-            raise RuntimeError("Index BM25 non initialisé.")
+            raise RuntimeError(
+                "Index BM25 non initialisé."
+            )
 
-        k = k or self.k
+        effective_k = (
+            self.k
+            if k is None
+            else int(k)
+        )
+
+        if effective_k <= 0:
+            return []
 
         query_tokens = self._tokenize(query)
 
         if not query_tokens:
             return []
 
-        scores = self.bm25.get_scores(query_tokens)
+        scores = self.bm25.get_scores(
+            query_tokens
+        )
 
         ranked_indices = sorted(
             range(len(scores)),
-            key=lambda i: scores[i],
-            reverse=True,
+            key=lambda i: (
+                -float(scores[i]),
+                i,
+            ),
         )
 
         results: List[Tuple[Document, float]] = []
 
-        for index in ranked_indices[:k]:
-            document = self.bm25_documents[index]
-            score = float(scores[index])
+        for index in ranked_indices:
 
-            results.append((document, score))
+            score = float(
+                scores[index]
+            )
+
+            # Important :
+            # les scores nuls ne doivent pas produire des documents
+            # arbitraires lorsque la requête ne matche aucun terme.
+            if score <= 0.0:
+                continue
+
+            results.append(
+                (
+                    self.bm25_documents[index],
+                    score,
+                )
+            )
+
+            if len(results) >= effective_k:
+                break
 
         return results
 
     # ============================================================
-    # RECHERCHE HYBRIDE
+    # HYBRID RRF
     # ============================================================
 
     def _hybrid_search(
@@ -243,73 +406,140 @@ class Retriever:
         query: str,
         k: Optional[int] = None,
     ) -> List[Tuple[Document, float]]:
-        """
-        Recherche hybride combinant vectorielle et BM25 via RRF pur.
 
-        Utilise l'algorithme RRF (Reciprocal Rank Fusion) pour fusionner
-        les résultats des deux méthodes de recherche sans pondération
-        hybride (plus de hybrid_alpha).
-
-        Args:
-            query: La requête de recherche
-            k: Nombre de résultats à retourner
-
-        Returns:
-            Liste de tuples (Document, score_rrf)
-        """
         if self.bm25 is None:
-            raise RuntimeError("Index BM25 non initialisé pour la recherche hybride.")
+            raise RuntimeError(
+                "Index BM25 non initialisé pour la recherche hybride."
+            )
 
-        k = k or self.k
-        hybrid_k = self.hybrid_k or k * 2
+        effective_k = (
+            self.k
+            if k is None
+            else int(k)
+        )
 
-        # Récupérer les résultats vectoriels
-        vectorial_results = self.vectordb.similarity_search_with_relevance_scores(
+        if effective_k <= 0:
+            return []
+
+        # On récupère suffisamment de candidats dans les deux systèmes.
+        candidate_k = max(
+            self.hybrid_k,
+            effective_k,
+        )
+
+        vector_results = (
+            self._vector_similarity_results(
+                query=query,
+                k=candidate_k,
+            )
+        )
+
+        bm25_results = (
+            self._bm25_search(
+                query=query,
+                k=candidate_k,
+            )
+        )
+
+        # Reciprocal Rank Fusion.
+        #
+        # RRF(d) = somme 1 / (60 + rank)
+        #
+        # Le score retourné n'est donc PAS un score de similarité
+        # compris entre 0 et 1.
+        rrf_constant = 60.0
+
+        rrf_scores: Dict[
+            Tuple[str, str, str],
+            float,
+        ] = {}
+
+        document_map: Dict[
+            Tuple[str, str, str],
+            Document,
+        ] = {}
+
+        # --------------------------------------------------------
+        # Vectoriel
+        # --------------------------------------------------------
+
+        for rank, (
+            document,
+            _score,
+        ) in enumerate(
+            vector_results,
+            start=1,
+        ):
+
+            key = self._document_key(
+                document
+            )
+
+            document_map[key] = document
+
+            rrf_scores[key] = (
+                rrf_scores.get(key, 0.0)
+                + 1.0 / (
+                    rrf_constant + rank
+                )
+            )
+
+        # --------------------------------------------------------
+        # BM25
+        # --------------------------------------------------------
+
+        for rank, (
+            document,
+            _score,
+        ) in enumerate(
+            bm25_results,
+            start=1,
+        ):
+
+            key = self._document_key(
+                document
+            )
+
+            document_map[key] = document
+
+            rrf_scores[key] = (
+                rrf_scores.get(key, 0.0)
+                + 1.0 / (
+                    rrf_constant + rank
+                )
+            )
+
+        # --------------------------------------------------------
+        # Classement final
+        # --------------------------------------------------------
+
+        sorted_keys = sorted(
+            rrf_scores.keys(),
+            key=lambda key: (
+                -rrf_scores[key],
+                key,
+            ),
+        )
+
+        results = [
+            (
+                document_map[key],
+                float(
+                    rrf_scores[key]
+                ),
+            )
+            for key in sorted_keys[
+                :effective_k
+            ]
+        ]
+
+        logger.info(
+            "Hybrid RRF | query=%r | vector=%d | bm25=%d | fused=%d",
             query,
-            k=hybrid_k,
+            len(vector_results),
+            len(bm25_results),
+            len(results),
         )
-
-        # Récupérer les résultats BM25
-        bm25_results = self._bm25_search(query, k=hybrid_k)
-
-        # Fusion RRF (Reciprocal Rank Fusion)
-        rrf_scores: Dict[Tuple[str, str], float] = {}
-        document_map: Dict[Tuple[str, str], Document] = {}
-
-        # Constante RRF (typiquement 60)
-        rrf_constant = 60
-
-        # Traiter les résultats vectoriels
-        for rank, (doc, score) in enumerate(vectorial_results, 1):
-            source = str(doc.metadata.get("source", ""))
-            key = (source, doc.page_content)
-            document_map[key] = doc
-
-            # Score RRF: 1 / (rrf_constant + rank)
-            rrf_scores[key] = rrf_scores.get(key, 0) + (1 / (rrf_constant + rank))
-
-        # Traiter les résultats BM25
-        for rank, (doc, score) in enumerate(bm25_results, 1):
-            source = str(doc.metadata.get("source", ""))
-            key = (source, doc.page_content)
-            document_map[key] = doc
-
-            # Score RRF: 1 / (rrf_constant + rank)
-            rrf_scores[key] = rrf_scores.get(key, 0) + (1 / (rrf_constant + rank))
-
-        # Trier par score RRF combiné
-        sorted_results = sorted(
-            rrf_scores.items(),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-
-        # Retourner les k meilleurs résultats
-        results: List[Tuple[Document, float]] = []
-        for (source, content), rrf_score in sorted_results[:k]:
-            doc = document_map.get((source, content))
-            if doc:
-                results.append((doc, rrf_score))
 
         return results
 
@@ -317,10 +547,10 @@ class Retriever:
     # RETRIEVE
     # ============================================================
 
-    def retrieve(self, query: str) -> List[Document]:
-        """
-        Recherche les documents pertinents.
-        """
+    def retrieve(
+        self,
+        query: str,
+    ) -> List[Document]:
 
         if not query or not query.strip():
             return []
@@ -328,19 +558,44 @@ class Retriever:
         query = query.strip()
 
         if self.search_type == "bm25":
-            results = self._bm25_search(query)
+            return [
+                document
+                for document, _score
+                in self._bm25_search(query)
+            ]
 
-            documents = [doc for doc, _ in results]
+        if self.search_type == "hybrid":
+            return [
+                document
+                for document, _score
+                in self._hybrid_search(query)
+            ]
 
-        elif self.search_type == "hybrid":
-            results = self._hybrid_search(query)
+        if self.search_type == "similarity_score_threshold":
 
-            documents = [doc for doc, _ in results]
+            results = self._vector_similarity_results(
+                query=query,
+                k=self.k,
+            )
 
-        else:
-            documents = self.retriever.invoke(query)
+            results = self._apply_similarity_threshold(
+                results
+            )
 
-        return documents
+            return [
+                document
+                for document, _score
+                in results
+            ]
+
+        if self.retriever is None:
+            raise RuntimeError(
+                "Retriever vectoriel non initialisé."
+            )
+
+        return self.retriever.invoke(
+            query
+        )
 
     # ============================================================
     # RETRIEVE AVEC SCORES
@@ -351,66 +606,70 @@ class Retriever:
         query: str,
         k: Optional[int] = None,
     ) -> List[Tuple[Document, float]]:
-        """
-        Recherche avec scores.
-
-        Retour :
-            [(Document, score), ...]
-        """
 
         if not query or not query.strip():
             return []
 
         query = query.strip()
-        effective_k = self.k if k is None else int(k)
+
+        effective_k = (
+            self.k
+            if k is None
+            else int(k)
+        )
+
         if effective_k <= 0:
-            raise ValueError("k doit être > 0.")
+            raise ValueError(
+                "k doit être > 0."
+            )
 
         # --------------------------------------------------------
         # BM25
         # --------------------------------------------------------
 
         if self.search_type == "bm25":
-            return self._bm25_search(query, k=effective_k)
+
+            return self._bm25_search(
+                query=query,
+                k=effective_k,
+            )
 
         # --------------------------------------------------------
-        # Hybrid
+        # HYBRID
         # --------------------------------------------------------
 
         if self.search_type == "hybrid":
-            return self._hybrid_search(query, k=effective_k)
+
+            return self._hybrid_search(
+                query=query,
+                k=effective_k,
+            )
 
         # --------------------------------------------------------
-        # Similarity
+        # SIMILARITY
         # --------------------------------------------------------
 
         if self.search_type == "similarity":
 
-            results = self.vectordb.similarity_search_with_relevance_scores(
-                query,
+            return self._vector_similarity_results(
+                query=query,
                 k=effective_k,
             )
 
-            return [
-                (doc, float(score))
-                for doc, score in results
-            ]
-
         # --------------------------------------------------------
-        # Similarity + Threshold
+        # SIMILARITY + THRESHOLD
         # --------------------------------------------------------
 
         if self.search_type == "similarity_score_threshold":
 
-            results = self.vectordb.similarity_search_with_relevance_scores(
-                query,
+            results = self._vector_similarity_results(
+                query=query,
                 k=effective_k,
             )
 
-            return [
-                (doc, float(score))
-                for doc, score in results
-            ]
+            return self._apply_similarity_threshold(
+                results
+            )
 
         # --------------------------------------------------------
         # MMR
@@ -418,59 +677,61 @@ class Retriever:
 
         if self.search_type == "mmr":
 
-            documents = self.vectordb.max_marginal_relevance_search(
-                query,
-                k=effective_k,
-                fetch_k=self.fetch_k,
-                lambda_mult=self.lambda_mult,
+            documents = (
+                self.vectordb.max_marginal_relevance_search(
+                    query,
+                    k=effective_k,
+                    fetch_k=max(
+                        self.fetch_k,
+                        effective_k,
+                    ),
+                    lambda_mult=self.lambda_mult,
+                )
             )
 
             if not documents:
                 return []
 
-            # MMR ne retourne pas directement les scores.
-            # On récupère les scores vectoriels des documents sélectionnés.
+            # MMR ne fournit pas directement les scores.
+            #
+            # On récupère les scores de pertinence des candidats
+            # vectoriels afin d'avoir un score traçable pour le Gate.
             candidate_results = (
-                self.vectordb.similarity_search_with_relevance_scores(
-                    query,
-                    k=max(self.fetch_k, effective_k),
+                self._vector_similarity_results(
+                    query=query,
+                    k=max(
+                        self.fetch_k,
+                        effective_k,
+                    ),
                 )
             )
 
-            score_map: Dict[Tuple[str, str], float] = {}
+            score_map = {
+                self._document_key(document): float(score)
+                for document, score
+                in candidate_results
+            }
 
-            for doc, score in candidate_results:
+            results: List[
+                Tuple[Document, float]
+            ] = []
 
-                source = str(
-                    doc.metadata.get("source", "")
+            for document in documents:
+
+                key = self._document_key(
+                    document
                 )
 
-                content = doc.page_content
-
-                key = (
-                    source,
-                    content,
+                score = score_map.get(
+                    key,
+                    0.0,
                 )
-
-                score_map[key] = float(score)
-
-            results: List[Tuple[Document, float]] = []
-
-            for doc in documents:
-
-                source = str(
-                    doc.metadata.get("source", "")
-                )
-
-                key = (
-                    source,
-                    doc.page_content,
-                )
-
-                score = score_map.get(key, 0.0)
 
                 results.append(
-                    (doc, score)
+                    (
+                        document,
+                        float(score),
+                    )
                 )
 
             return results
@@ -478,3 +739,4 @@ class Retriever:
         raise RuntimeError(
             f"Type de recherche inconnu : {self.search_type}"
         )
+
