@@ -1,4 +1,3 @@
-
 """TELNET Support Bot - point d'entrée principal."""
 
 from __future__ import annotations
@@ -6,6 +5,17 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -31,7 +41,7 @@ if str(SRC_DIR) not in sys.path:
 # IMPORT
 # ============================================================
 
-from rag_projet_corrige.rag_fixed_final.pipeline import (  # noqa: E402
+from rag_projet_corrige.rag_fixed_final.pipeline import (  
     RAGPipeline,
 )
 
@@ -285,26 +295,8 @@ def main() -> None:
         # mmr
         #
         # NON utilisé pour hybrid.
-        relevance_threshold=0.40,
-
-        # ----------------------------------------------------
-        # BM25
-        # ----------------------------------------------------
-
-        # BM25 produit des scores dont l'échelle dépend
-        # du corpus. On laisse None par défaut.
-        bm25_relevance_threshold=None,
-
-        # ----------------------------------------------------
-        # HYBRID / RRF
-        # ----------------------------------------------------
-
-        # Très important :
-        # un score RRF est généralement très inférieur à 0.40.
-        #
-        # On ne met donc PAS 0.40 ici.
-        # Le Gate RRF reste désactivé jusqu'à calibration.
-        hybrid_relevance_threshold=None,
+        # Désactivé pour hybrid car les scores RRF sont beaucoup plus bas (0.01-0.03)
+        relevance_threshold=None,
 
         # ----------------------------------------------------
         # SIMILARITY SCORE THRESHOLD

@@ -1,0 +1,736 @@
+{
+"project": "TELNET Support Bot / SmartConnect",
+
+"description": "Jeu de tests RAG enrichi pour évaluer le comportement conversationnel, le retrieval, la robustesse, la dépendance à l'historique, les réponses hors sujet et quelques critères simples de génération. Les expected_sources correspondent exclusivement aux fichiers réellement présents dans le dossier data.",
+
+"instructions": [
+"Exécuter les tests dans l'ordre lorsque la catégorie est historique.",
+"Conserver la même session de conversation pour les tests de dépendance à l'historique.",
+"Comparer la réponse réelle avec expected_behavior.",
+"Vérifier dans les logs si la recherche RAG a été déclenchée ou non.",
+"Comparer les sources réellement récupérées avec expected_sources.",
+"Ne pas considérer une source comme valide si son nom ne correspond pas à un fichier réellement présent dans data.",
+"Pour les questions auxquelles les documents ne fournissent pas de réponse, vérifier que le bot signale explicitement l'absence d'information au lieu d'inventer une réponse.",
+"Les métriques de retrieval sont calculées au niveau des fichiers sources."
+],
+
+"tests": [
+
+
+{
+  "id": 1,
+  "category": "conversationnel",
+  "question": "Bonjour",
+  "expected_behavior": "Réponse conversationnelle, sans recherche RAG et sans sources.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "session": "test_1"
+  }
+},
+
+{
+  "id": 2,
+  "category": "smartconnect",
+  "question": "Qu'est-ce que SmartConnect ?",
+  "expected_behavior": "Recherche RAG et réponse basée sur les documents de présentation/installation de SmartConnect. Ne pas utiliser de fichiers inexistants.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "01_guide_installation_smartconnect.md"
+    ],
+    "answer_keywords": [
+      "SmartConnect",
+      "plateforme",
+      "IoT"
+    ],
+    "session": "test_2"
+  }
+},
+
+{
+  "id": 3,
+  "category": "smartconnect",
+  "question": "Comment obtenir un token JWT ?",
+  "expected_behavior": "Recherche RAG dans la documentation API et réponse expliquant l'authentification JWT et l'appel POST /api/v1/auth/login.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "JWT",
+      "token",
+      "/api/v1/auth/login"
+    ],
+    "session": "history_token"
+  }
+},
+
+{
+  "id": 4,
+  "category": "historique",
+  "question": "Et quelle est sa durée de validité ?",
+  "expected_behavior": "Doit utiliser l'historique pour comprendre que « sa » désigne le token JWT. La documentation fournit un champ expires_at, mais ne fournit pas de durée de validité explicite en heures ou minutes.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "expires_at",
+      "expiration"
+    ],
+    "session": "history_token"
+  }
+},
+
+{
+  "id": 5,
+  "category": "historique",
+  "question": "Et comment le renouveler ?",
+  "expected_behavior": "Doit utiliser l'historique pour comprendre que « le » désigne le token JWT. La documentation fournie ne décrit pas de mécanisme de renouvellement ou d'endpoint refresh. Le bot ne doit donc pas inventer une procédure et doit signaler que cette information n'est pas documentée.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "token",
+      "authentification"
+    ],
+    "forbidden_behavior": [
+      "inventer un endpoint /refresh",
+      "inventer une durée de renouvellement",
+      "inventer une procédure non présente dans la documentation"
+    ],
+    "session": "history_token"
+  }
+},
+
+{
+  "id": 6,
+  "category": "question_independante",
+  "question": "Comment fonctionne SmartConnect ?",
+  "expected_behavior": "Question compréhensible sans historique. Recherche RAG avec la question originale. Utiliser le guide d'installation réel.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "01_guide_installation_smartconnect.md"
+    ],
+    "answer_keywords": [
+      "SmartConnect",
+      "plateforme",
+      "IoT"
+    ],
+    "session": "test_6"
+  }
+},
+
+{
+  "id": 7,
+  "category": "invalide",
+  "question": "jnk",
+  "expected_behavior": "Demander une reformulation ou indiquer poliment que la demande n'est pas compréhensible, sans recherche RAG.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "session": "test_7"
+  }
+},
+
+{
+  "id": 8,
+  "category": "invalide",
+  "question": "rdvfd",
+  "expected_behavior": "Demander une reformulation ou indiquer poliment que la demande n'est pas compréhensible, sans recherche RAG.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "session": "test_8"
+  }
+},
+
+{
+  "id": 9,
+  "category": "hors_sujet",
+  "question": "Quelle est la capitale de la France ?",
+  "expected_behavior": "Ne pas utiliser les documents SmartConnect pour fabriquer une réponse. Refuser poliment ou indiquer que le bot est spécialisé dans SmartConnect.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "answer_keywords": [
+      "SmartConnect"
+    ],
+    "session": "test_9"
+  }
+},
+
+{
+  "id": 10,
+  "category": "robustesse",
+  "question": "Coment obtenir un token JWT ?",
+  "expected_behavior": "Comprendre malgré la faute d'orthographe et retrouver la documentation API pertinente.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "JWT",
+      "token",
+      "/api/v1/auth/login"
+    ],
+    "session": "test_10"
+  }
+},
+
+{
+  "id": 11,
+  "category": "conversationnel",
+  "question": "Merci",
+  "expected_behavior": "Réponse conversationnelle, sans recherche RAG.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "session": "test_11"
+  }
+},
+
+{
+  "id": 12,
+  "category": "smartconnect",
+  "question": "Comment authentifier une requête API ?",
+  "expected_behavior": "Recherche RAG dans la documentation API et réponse utilisant l'en-tête Authorization avec un Bearer Token JWT.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "Authorization",
+      "Bearer",
+      "JWT",
+      "authent"
+    ],
+    "session": "test_12"
+  }
+},
+
+{
+  "id": 13,
+  "category": "invalide",
+  "question": "???",
+  "expected_behavior": "Demander une reformulation, sans recherche RAG.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "session": "test_13"
+  }
+},
+
+{
+  "id": 14,
+  "category": "hors_sujet",
+  "question": "Comment faire une pizza ?",
+  "expected_behavior": "Ne pas utiliser les documents SmartConnect pour fabriquer une réponse hors sujet. Refuser poliment ou demander une question liée à SmartConnect.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "session": "test_14"
+  }
+},
+
+{
+  "id": 15,
+  "category": "smartconnect",
+  "question": "Quels sont les codes d'erreur de l'API ?",
+  "expected_behavior": "Recherche RAG dans la documentation API et restitution des codes documentés.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "200",
+      "201",
+      "400",
+      "401",
+      "403",
+      "404",
+      "429",
+      "500"
+    ],
+    "session": "test_15"
+  }
+},
+
+{
+  "id": 16,
+  "category": "smartconnect",
+  "question": "Comment réinitialiser le mot de passe ?",
+  "expected_behavior": "Recherche RAG et réponse basée sur la FAQ des problèmes courants.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "02_faq_problemes_courants.md"
+    ],
+    "answer_keywords": [
+      "mot de passe",
+      "réinitialiser",
+      "changepassword"
+    ],
+    "session": "test_16"
+  }
+},
+
+{
+  "id": 17,
+  "category": "smartconnect",
+  "question": "Comment mettre à jour SmartConnect vers une nouvelle version ?",
+  "expected_behavior": "Recherche RAG et réponse basée sur la procédure de mise à jour de la FAQ. La sauvegarde doit être mentionnée avant la mise à jour.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "02_faq_problemes_courants.md"
+    ],
+    "answer_keywords": [
+      "mise à jour",
+      "sauvegarder",
+      "docker pull"
+    ],
+    "session": "test_17"
+  }
+},
+
+{
+  "id": 18,
+  "category": "smartconnect",
+  "question": "Que faire si les notifications email ne partent pas ?",
+  "expected_behavior": "Recherche RAG dans la FAQ des problèmes courants et réponse basée sur la configuration SMTP et les vérifications indiquées.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "02_faq_problemes_courants.md"
+    ],
+    "answer_keywords": [
+      "SMTP",
+      "notification",
+      "email",
+      "587"
+    ],
+    "session": "test_18"
+  }
+},
+
+{
+  "id": 19,
+  "category": "smartconnect",
+  "question": "Comment configurer le broker MQTT ?",
+  "expected_behavior": "Recherche RAG dans la documentation de configuration réseau et réponse basée sur Mosquitto et sa configuration.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "07_configuration_reseau.md"
+    ],
+    "answer_keywords": [
+      "MQTT",
+      "Mosquitto",
+      "1883",
+      "8883"
+    ],
+    "session": "test_19"
+  }
+},
+
+{
+  "id": 20,
+  "category": "smartconnect",
+  "question": "Que faire si les devices apparaissent hors ligne ?",
+  "expected_behavior": "Recherche RAG dans le guide de troubleshooting et réponse basée sur les vérifications de passerelle, ping et broker MQTT.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "08_troubleshooting_guide.md"
+    ],
+    "answer_keywords": [
+      "passerelle",
+      "ping",
+      "MQTT"
+    ],
+    "session": "test_20"
+  }
+},
+
+{
+  "id": 21,
+  "category": "smartconnect",
+  "question": "Comment créer une alerte ?",
+  "expected_behavior": "Recherche RAG dans le guide utilisateur du dashboard et réponse basée sur la procédure Alertes > Nouvelle règle.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "04_guide_utilisateur_dashboard.md"
+    ],
+    "answer_keywords": [
+      "alerte",
+      "Nouvelle règle",
+      "Sauvegarder"
+    ],
+    "session": "test_21"
+  }
+},
+
+{
+  "id": 22,
+  "category": "smartconnect",
+  "question": "Comment ajouter un nouvel utilisateur ?",
+  "expected_behavior": "Recherche RAG dans la FAQ et/ou la documentation API. La réponse peut présenter l'ajout via POST /api/v1/users ou via Administration > Utilisateurs > Ajouter.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "02_faq_problemes_courants.md",
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "utilisateur",
+      "POST",
+      "/api/v1/users"
+    ],
+    "session": "test_22"
+  }
+},
+
+{
+  "id": 23,
+  "category": "smartconnect",
+  "question": "Quel endpoint permet de lister les devices ?",
+  "expected_behavior": "Recherche RAG dans la documentation API et identification de GET /api/v1/devices.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "03_documentation_api.md"
+    ],
+    "answer_keywords": [
+      "/api/v1/devices",
+      "GET"
+    ],
+    "session": "test_23"
+  }
+},
+
+{
+  "id": 24,
+  "category": "robustesse",
+  "question": "Coment réinitialiser le mot de passe ?",
+  "expected_behavior": "Tolérer la faute de frappe et retrouver la FAQ pertinente.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": true,
+    "expected_sources": [
+      "02_faq_problemes_courants.md"
+    ],
+    "answer_keywords": [
+      "mot de passe",
+      "réinitialiser",
+      "changepassword"
+    ],
+    "session": "test_24"
+  }
+},
+
+{
+  "id": 25,
+  "category": "hors_sujet",
+  "question": "Quel temps fait-il aujourd'hui ?",
+  "expected_behavior": "Ne pas fabriquer une réponse SmartConnect à partir des documents. Indiquer que le bot est spécialisé dans SmartConnect et demander une question liée au produit.",
+  "actual_response": null,
+  "rag_test": {
+    "retrieval_triggered": null,
+    "retrieval_type": null,
+    "search_query": null,
+    "rewritten_query": null,
+    "needs_history": null,
+    "sources_count": null,
+    "scores": null
+  },
+  "eval": {
+    "expected_retrieval": false,
+    "expected_sources": [],
+    "answer_keywords": [
+      "SmartConnect"
+    ],
+    "session": "test_25"
+  }
+}
+
+
+],
+
+"evaluation_notes": {
+"retrieval_metrics": "Hit@K, Recall@K, Precision@K et MRR sont calculés au niveau des fichiers sources lorsque expected_sources est renseigné.",
+
+
+"generation_metrics": "La présence de answer_keywords est utilisée comme indicateur lexical simple et ne constitue pas une mesure de faithfulness.",
+
+"history": "Les tests 3, 4 et 5 partagent la session history_token et doivent être exécutés strictement dans cet ordre.",
+
+"document_inventory": [
+  "01_guide_installation_smartconnect.md",
+  "02_faq_problemes_courants.md",
+  "03_documentation_api.md",
+  "04_guide_utilisateur_dashboard.md",
+  "05_procedure_maintenance.md",
+  "06_notes_version.md",
+  "07_configuration_reseau.md",
+  "08_troubleshooting_guide.md"
+],
+
+"important_documentation_gap": "La documentation API explique l'obtention d'un JWT via POST /api/v1/auth/login et expose expires_at, mais ne documente aucun mécanisme explicite de refresh/renouvellement du token. Le test 5 doit donc évaluer la capacité du bot à reconnaître cette absence plutôt qu'à inventer une solution.",
+
+"important_source_correction": "Les sources 01_presentation et 01_introduction ont été supprimées des expected_sources car ces fichiers n'existent pas dans le dossier data.",
+
+"out_of_scope_behavior": "Les questions hors sujet et invalides ne doivent pas provoquer de recherche RAG SmartConnect."
+
+
+}
+}

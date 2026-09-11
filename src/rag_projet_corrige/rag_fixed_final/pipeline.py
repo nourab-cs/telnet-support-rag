@@ -60,16 +60,14 @@ class RAGPipeline:
         embedding_model: str = "BAAI/bge-m3",
         llm_model: str = "mistral",
 
-        retrieval_type: str = "mmr",
+        retrieval_type: str = "hybrid",
         retrieval_k: int = 8,
         retrieval_fetch_k: int = 20,
         retrieval_lambda: float = 0.6,
         hybrid_k: int = 10,
 
         relevance_threshold: Optional[float] = 0.40,
-        bm25_relevance_threshold: Optional[float] = None,
-        hybrid_relevance_threshold: Optional[float] = None,
-        similarity_score_threshold: Optional[float] = 0.40,
+        similarity_score_threshold: Optional[float] = None,
 
         max_context_documents: int = 6,
 
@@ -114,22 +112,15 @@ class RAGPipeline:
                 "max_context_documents doit être > 0."
             )
 
-        for name, value in {
-            "relevance_threshold": relevance_threshold,
-            "bm25_relevance_threshold": bm25_relevance_threshold,
-            "hybrid_relevance_threshold": hybrid_relevance_threshold,
-        }.items():
-
-            if value is not None and float(value) < 0:
-                raise ValueError(
-                    f"{name} doit être >= 0 ou None."
-                )
+        if relevance_threshold is not None and float(relevance_threshold) < 0:
+            raise ValueError(
+                "relevance_threshold doit être >= 0 ou None."
+            )
 
         if similarity_score_threshold is not None:
             if not 0.0 <= float(similarity_score_threshold) <= 1.0:
                 raise ValueError(
-                    "similarity_score_threshold doit être compris "
-                    "entre 0 et 1."
+                    "similarity_score_threshold doit être compris entre 0 et 1."
                 )
 
         # ========================================================
@@ -150,8 +141,6 @@ class RAGPipeline:
         self.hybrid_k = int(hybrid_k)
 
         self.relevance_threshold = relevance_threshold
-        self.bm25_relevance_threshold = bm25_relevance_threshold
-        self.hybrid_relevance_threshold = hybrid_relevance_threshold
         self.similarity_score_threshold = similarity_score_threshold
 
         self.max_context_documents = int(
@@ -165,8 +154,6 @@ class RAGPipeline:
         self.enable_query_rewriting = (
             enable_query_rewriting
         )
-
-        self.chunking_version = "chunking_agent_v1"
 
         self.index_documents: List[
             Document
@@ -199,11 +186,14 @@ class RAGPipeline:
         self.chunker = ChunkingAgent(
             model_name=llm_model,
             embeddings=self.embeddings,
-            enable_llm_analysis=False,
+            enable_llm_analysis=True,
             target_chunk_size=900,
             min_chunk_size=300,
             max_chunk_size=1200,
         )
+
+        # Version dynamique basée sur la configuration réelle du chunker
+        self.chunking_version = self._generate_chunking_version()
 
         # ========================================================
         # CHROMA
@@ -263,6 +253,27 @@ class RAGPipeline:
             temperature=0.0,
             num_predict=160,
         )
+
+    # ============================================================
+    # CHUNKING VERSION
+    # ============================================================
+
+    def _generate_chunking_version(self) -> str:
+        """
+        Génère une signature de version basée sur la configuration du chunker.
+        """
+        import hashlib
+
+        config_str = (
+            f"target={self.chunker.target_chunk_size}"
+            f"|min={self.chunker.min_chunk_size}"
+            f"|max={self.chunker.max_chunk_size}"
+            f"|llm={self.chunker.enable_llm_analysis}"
+        )
+
+        return hashlib.sha256(
+            config_str.encode("utf-8")
+        ).hexdigest()[:16]
 
     # ============================================================
     # JSON
@@ -567,7 +578,7 @@ JSON :
         try:
 
             response = (
-                self.query_rewriter.llm.invoke(
+                self.question_validator.invoke(
                     prompt
                 )
             )
@@ -648,9 +659,7 @@ JSON :
             fetch_k=self.retrieval_fetch_k,
             lambda_mult=self.retrieval_lambda,
             hybrid_k=self.hybrid_k,
-            similarity_score_threshold=(
-                self.similarity_score_threshold
-            ),
+            similarity_score_threshold=self.similarity_score_threshold,
         )
 
         self.generator = Generator(
@@ -938,12 +947,6 @@ JSON :
     def _get_relevance_threshold(
         self,
     ) -> Optional[float]:
-
-        if self.retrieval_type == "bm25":
-            return self.bm25_relevance_threshold
-
-        if self.retrieval_type == "hybrid":
-            return self.hybrid_relevance_threshold
 
         if self.retrieval_type == "similarity_score_threshold":
             return self.similarity_score_threshold
@@ -1900,14 +1903,6 @@ JSON :
 
             "relevance_threshold": (
                 self.relevance_threshold
-            ),
-
-            "bm25_relevance_threshold": (
-                self.bm25_relevance_threshold
-            ),
-
-            "hybrid_relevance_threshold": (
-                self.hybrid_relevance_threshold
             ),
 
             "similarity_score_threshold": (

@@ -37,14 +37,14 @@ class Retriever:
 
     def __init__(
         self,
-        vectordb: Any,
-        documents: Optional[List[Document]] = None,
-        k: int = 8,
+        vectordb: Any, 
+        documents: Optional[List[Document]] = None, #bm25, hybrid
+        k: int = 8, 
         search_type: str = "similarity",
-        fetch_k: int = 20,
-        lambda_mult: float = 0.6,
-        hybrid_k: int = 10,
-        similarity_score_threshold: Optional[float] = None,
+        fetch_k: int = 20,    #mmr
+        lambda_mult: float = 0.6, #mmr
+        hybrid_k: int = 10,   #hybrid
+        similarity_score_threshold: Optional[float] = None, #similarity_score_threshold
     ) -> None:
 
         if vectordb is None:
@@ -115,6 +115,7 @@ class Retriever:
         Exemple :
             https://host/api/devices
         produit notamment :
+            https://host/api/devices
             https
             host
             api
@@ -128,12 +129,16 @@ class Retriever:
 
         text = str(text).lower()
 
+        # Capturer les tokens techniques complets (URLs, chemins, identifiants techniques)
+        # Cette regex capture des séquences comme "https://host/api/devices" ou "TLS-8443"
         full_tokens = re.findall(
-            r"[a-zàâçéèêëîïôûùüÿñæœ0-9_]+"
-            r"(?:[./:-][a-zàâçéèêëîïôûùüÿñæœ0-9_]+)*",
+            r"[a-zàâçéèêëîïôûùüÿñæœ0-9_-]+"
+            r"(?:://?[a-zàâçéèêëîïôûùüÿñæœ0-9_/-]+)*"  # Pour https://host/...
+            r"(?:[./-][a-zàâçéèêëîïôûùüÿñæœ0-9_/-]+)*",  # Pour /api/devices ou TLS-8443
             text,
         )
 
+        # Capturer les tokens atomiques individuels
         atomic_tokens = re.findall(
             r"[a-zàâçéèêëîïôûùüÿñæœ0-9_]+",
             text,
